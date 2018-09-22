@@ -77,7 +77,7 @@ __FBSDID("$FreeBSD: src/sys/dev/re/if_re.c,v 1.95.00 " __DATE__ " " __TIME__ "  
 #include <sys/endian.h>
 
 #include <dev/mii/mii.h>
-#include <dev/re/if_rereg.h>
+#include "if_rereg.h"
 
 #if OS_VER < VERSION(5,3)
 #include <pci/pcireg.h>
