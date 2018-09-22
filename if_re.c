@@ -3748,6 +3748,10 @@ static void re_init_software_variable(struct re_softc *sc)
                 sc->max_jumbo_frame_size -= (sc->re_rx_mbuf_sz - MJUM9BYTES);
                 sc->re_rx_mbuf_sz = MJUM9BYTES;
         }
+        if (sc->re_rx_mbuf_sz > MJUMPAGESIZE) {
+                sc->max_jumbo_frame_size -= (sc->re_rx_mbuf_sz - MJUMPAGESIZE);
+                sc->re_rx_mbuf_sz = MJUMPAGESIZE;
+        }
 
         switch(sc->re_type) {
         case MACFG_63:
