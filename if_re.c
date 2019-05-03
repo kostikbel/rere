@@ -7501,14 +7501,11 @@ struct re_softc		*sc;
         }
 
         /* now program new ones */
-#if OS_VER > VERSION(6,0)
-        IF_ADDR_LOCK(ifp);
-#endif
-#if OS_VER < VERSION(4,9)
-        for (ifma = ifp->if_multiaddrs.lh_first; ifma != NULL;
-             ifma = ifma->ifma_link.le_next)
-#else
+	if_maddr_rlock(ifp);
+#if __FreeBSD_version <= 1200035
         TAILQ_FOREACH(ifma,&ifp->if_multiaddrs,ifma_link)
+#else
+	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link)
 #endif
         {
                 if (ifma->ifma_addr->sa_family != AF_LINK)
@@ -7521,9 +7518,7 @@ struct re_softc		*sc;
                         hashes[1] |= (1 << (h - 32));
                 mcnt++;
         }
-#if OS_VER > VERSION(6,0)
-        IF_ADDR_UNLOCK(ifp);
-#endif
+	if_maddr_runlock(ifp);
 
         if (mcnt) {
                 if ((sc->re_if_flags & RL_FLAG_PCIE) != 0) {
