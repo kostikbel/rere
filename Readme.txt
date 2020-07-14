@@ -1,8 +1,9 @@
 =================================================================================
 =  Realtek 8169S/8169SB/8169SC/8168B/8168C/8168CP/8168D/8168DP/8168E/8168F      =
-=  8168FB/8168G/8168GU/8168H/8168EP/8411/RTL8168FP                              =
-=  8101E/8102E/8103E/8401/8105E/8106E/8107E/8402 Driver                         =
-=  for FreeBSD v4.x/5.x/6.x/7.x/8.x/9.x                                         =
+=  8168FB/8168G/818GU/8168H/8168EP/8411/8168FP                                  =
+=  8101E/8102E/8103E/8401/8105E/8106E/8402                                      =
+=  8125 Driver                                                                  =
+=  for FreeBSD v4.x/5.x/6.x/7.x/8.x/9.x/10.x/11.x//12.x                         =
 =================================================================================
 
 This driver is modified by Realtek Semiconductor corp. and it has been tested OK
@@ -54,7 +55,7 @@ Method 2:
 			# reboot
 
 		3. update the driver source code:
-		    Copy the dirver source code( if_re.c and if_rereg.h) into /usr/src/sys/dev/re
+		    Copy the driver source code( if_re.c and if_rereg.h) into /usr/src/sys/dev/re
 		    Copy the Makefile into /usr/src/sys/modules/re
 
 		4. build the driver:
@@ -63,7 +64,12 @@ Method 2:
 			# make
 
 		5. install the driver
+			(for FreeBSD 12 or later)
+			# cd /usr/obj/usr/src/<arch>.<arch>/sys/modules
+			# kldload ./if_re.ko
+			(for FreeBSD 11 or earlier)
 			# cd /usr/src/sys/modules/re
+
 			# kldload ./if_re.ko
 
 		6. configurate the static IP address
