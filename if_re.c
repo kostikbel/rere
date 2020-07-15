@@ -3428,16 +3428,6 @@ is_valid_ether_addr(const u_int8_t * addr)
         return !is_multicast_ether_addr(addr) && !is_zero_ether_addr(addr);
 }
 
-static inline void
-random_ether_addr(u_int8_t * dst)
-{
-        if (read_random(dst, 6) == 0)
-                arc4rand(dst, 6, 0);
-
-        dst[0] &= 0xfe;
-        dst[0] |= 0x02;
-}
-
 static void re_disable_now_is_oob(struct re_softc *sc)
 {
         if (sc->re_hw_supp_now_is_oob_ver == 1)
@@ -3889,7 +3879,7 @@ static void re_get_hw_mac_address(struct re_softc *sc, u_int8_t *eaddr)
 
         if (!is_valid_ether_addr(eaddr)) {
                 device_printf(dev,"Invalid ether addr: %6D\n", eaddr, ":");
-                random_ether_addr(eaddr);
+                ether_gen_addr(sc->re_ifp, (struct ether_addr *)eaddr);
                 device_printf(dev,"Random ether addr: %6D\n", eaddr, ":");
         }
 
