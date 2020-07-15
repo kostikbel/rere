@@ -63,7 +63,6 @@ __FBSDID("$FreeBSD: src/sys/dev/re/if_re.c,v " RE_VERSION __DATE__ " " __TIME__ 
 #include <sys/kernel.h>
 #include <sys/socket.h>
 #include <sys/taskqueue.h>
-#include <sys/random.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
