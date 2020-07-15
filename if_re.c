@@ -285,6 +285,8 @@ static int s0_magic_packet = 1;
 static int s0_magic_packet = 0;
 #endif
 TUNABLE_INT("hw.re.s0_magic_packet", &s0_magic_packet);
+static int max_rx_mbuf_sz = MJUM9BYTES;
+TUNABLE_INT("hw.re.max_rx_mbuf_sz", &max_rx_mbuf_sz);
 
 #define RE_CSUM_FEATURES    (CSUM_IP | CSUM_TCP | CSUM_UDP)
 
@@ -4280,13 +4282,9 @@ static void re_init_software_variable(struct re_softc *sc)
 
         sc->re_rx_mbuf_sz = sc->max_jumbo_frame_size + ETHER_VLAN_ENCAP_LEN + ETHER_HDR_LEN + ETHER_CRC_LEN + RE_ETHER_ALIGN + 1;
 
-        if (sc->re_rx_mbuf_sz > MJUM9BYTES) {
-                sc->max_jumbo_frame_size -= (sc->re_rx_mbuf_sz - MJUM9BYTES);
-                sc->re_rx_mbuf_sz = MJUM9BYTES;
-        }
-        if (sc->re_rx_mbuf_sz > MJUMPAGESIZE) {
-                sc->max_jumbo_frame_size -= (sc->re_rx_mbuf_sz - MJUMPAGESIZE);
-                sc->re_rx_mbuf_sz = MJUMPAGESIZE;
+        if (sc->re_rx_mbuf_sz > max_rx_mbuf_sz) {
+                sc->max_jumbo_frame_size -= (sc->re_rx_mbuf_sz - max_rx_mbuf_sz);
+                sc->re_rx_mbuf_sz = max_rx_mbuf_sz;
         }
 
         switch(sc->re_type) {
