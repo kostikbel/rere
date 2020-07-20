@@ -8644,11 +8644,17 @@ struct re_softc		*sc;
         }
 
         /* now program new ones */
-#if OS_VER < VERSION(12,0)
+#if OS_VER >= VERSION(12,0)
+	if_maddr_rlock(ifp);
+#elif OS_VER > VERSION(6,0)
         IF_ADDR_LOCK(ifp);
+#endif
+#if OS_VER < VERSION(4,9)
+        for (ifma = ifp->if_multiaddrs.lh_first; ifma != NULL;
+             ifma = ifma->ifma_link.le_next)
+#elif OS_VER < VERSION(12,0)
         TAILQ_FOREACH(ifma,&ifp->if_multiaddrs,ifma_link)
 #else
-	if_maddr_rlock(ifp);
         CK_STAILQ_FOREACH(ifma,&ifp->if_multiaddrs,ifma_link)
 #endif
         {
@@ -8662,10 +8668,10 @@ struct re_softc		*sc;
                         hashes[1] |= (1 << (h - 32));
                 mcnt++;
         }
-#if OS_VER < VERSION(12,0)
-        IF_ADDR_UNLOCK(ifp);
-#else
+#if OS_VER >= VERSION(12,0)
 	if_maddr_runlock(ifp);
+#elif OS_VER > VERSION(6,0)
+        IF_ADDR_UNLOCK(ifp);
 #endif
 
         if (mcnt) {
