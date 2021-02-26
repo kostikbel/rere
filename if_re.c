@@ -8663,7 +8663,7 @@ struct re_softc		*sc;
 
         /* now program new ones */
 #if OS_VER >= VERSION(13,0)
-	if_foreach_llmaddr(ifp, re_hash_maddr, hashes);
+	mcnt = if_foreach_llmaddr(ifp, re_hash_maddr, hashes);
 #else
 #if OS_VER >= VERSION(12,0)
 	if_maddr_rlock(ifp);
