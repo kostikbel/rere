@@ -32,23 +32,13 @@
  * $FreeBSD: src/sys/dev/re/if_rereg.h,v 1.14.2.1 2001/07/19 18:33:07 wpaul Exp $
  */
 
-/*#define VERSION(_MainVer,_MinorVer)	((_MainVer)*10+(_MinorVer))*/
-/*#define OS_VER	VERSION(5,1)*/
-#if __FreeBSD_version < 500000
-#define VERSION(_MainVer,_MinorVer)	((_MainVer)*100000+(_MinorVer)*10000)
-#else
+
 #define VERSION(_MainVer,_MinorVer)	((_MainVer)*100000+(_MinorVer)*1000)
-#endif
 #define OS_VER	__FreeBSD_version
 
 #ifndef	M_DONTWAIT
 #define	M_DONTWAIT	M_NOWAIT
 #endif
-
-#if OS_VER>=VERSION(4,0)
-#define	RE_USE_NEW_CALLOUT_FUN	1
-#endif
-
 
 /*
  * RealTek RTL8110S/SB/SC register offsets
@@ -174,10 +164,6 @@
 #define	ERIAR_ByteEn_shift  12
 #define ERIAR_OOB 2
 
-
-
-
-
 /* Direct PHY access registers only available on 8139 */
 #define RE_BMCR		0x0062		/* PHY basic mode control */
 #define RE_BMSR		0x0064		/* PHY basic mode status */
@@ -193,7 +179,6 @@
 #define RE_LDPS		0x0082		/* Link Down Power Saving */
 #define RE_CPCR		0x00E0
 #define	RE_IM		0x00E2
-
 
 /*
  * TX config register bits
@@ -872,11 +857,7 @@ enum {
 //#define MAC_STYLE_2	2	/* RTL8111C/CP/D and RTL8102E */
 
 struct re_softc {
-#if OS_VER<VERSION(6,0)
-        struct arpcom		arpcom;			/* interface info */
-#else
         struct ifnet		*re_ifp;
-#endif
 
         bus_space_handle_t	re_bhandle;		/* bus space handle */
         bus_space_tag_t		re_btag;			/* bus space tag */
@@ -906,11 +887,7 @@ struct re_softc {
 
         struct re_chain_data	re_cdata;		/* Tx buffer chain, Used only in ~C+ mode */
         struct re_descriptor	re_desc;			/* Descriptor, Used only in C+ mode */
-#ifdef RE_USE_NEW_CALLOUT_FUN
         struct callout	re_stat_ch;
-#else
-        struct callout_handle	re_stat_ch;
-#endif
         u_int8_t		re_link_chg_det;
         struct mtx		mtx;
         bus_dma_tag_t		re_parent_tag;
@@ -938,9 +915,9 @@ struct re_softc {
 
         u_int16_t re_sw_ram_code_ver;
         u_int16_t re_hw_ram_code_ver;
-#if OS_VER>=VERSION(7,0)
+
         struct task		re_inttask;
-#endif
+
         u_int16_t cur_page;
 
         u_int16_t phy_reg_anlpar;
@@ -970,11 +947,8 @@ struct re_softc {
 
         int (*ifmedia_upd)(struct ifnet *);
         void (*ifmedia_sts)(struct ifnet *, struct ifmediareq *);
-#if OS_VER < VERSION(7,0)
-        void (*intr)(void *);
-#else
+
         int (*intr)(void *);
-#endif //OS_VER < VERSION(7,0)
         void (*int_task)(void *, int);
         void (*hw_start_unlock)(struct re_softc *);
 };
@@ -1023,10 +997,8 @@ enum bits {
 /*
  * register space access macros
  */
-#if OS_VER>VERSION(5,9)
 #define CSR_WRITE_STREAM_4(sc, reg, val)	((sc->prohibit_access_reg)?:bus_space_write_stream_4(sc->re_btag, sc->re_bhandle, reg, val))
 #define CSR_WRITE_STREAM_2(sc, reg, val)	((sc->prohibit_access_reg)?:bus_space_write_stream_2(sc->re_btag, sc->re_bhandle, reg, val))
-#endif
 #define CSR_WRITE_4(sc, reg, val)	((sc->prohibit_access_reg)?:bus_space_write_4(sc->re_btag, sc->re_bhandle, reg, val))
 #define CSR_WRITE_2(sc, reg, val)	((sc->prohibit_access_reg)?:bus_space_write_2(sc->re_btag, sc->re_bhandle, reg, val))
 #define CSR_WRITE_1(sc, reg, val)	((sc->prohibit_access_reg)?:bus_space_write_1(sc->re_btag, sc->re_bhandle, reg, val))
@@ -1159,11 +1131,6 @@ enum bits {
 #define NIC_RAMCODE_VERSION_8125B_REV_A (0x0B17)
 #define NIC_RAMCODE_VERSION_8125B_REV_B (0x0B36)
 
-#ifdef __alpha__
-#undef vtophys
-#define vtophys(va)     alpha_XXX_dmamap((vm_offset_t)va)
-#endif
-
 #ifndef TRUE
 #define TRUE		1
 #endif
@@ -1203,33 +1170,14 @@ enum bits {
 #define DBGPRINT1(_unit, _msg, _para1)
 #endif
 
-#if OS_VER<VERSION(4,9)
-#define IFM_1000_T		IFM_1000_TX
-#elif OS_VER<VERSION(6,0)
-#define RE_GET_IFNET(SC)	&SC->arpcom.ac_if
-#define if_drv_flags		if_flags
-#define IFF_DRV_RUNNING		IFF_RUNNING
-#define IFF_DRV_OACTIVE		IFF_OACTIVE
-#else
 #define RE_GET_IFNET(SC)	SC->re_ifp
-#endif
 
-#if OS_VER>=VERSION(10,0)
 #define IF_ADDR_LOCK        IF_ADDR_WLOCK
 #define IF_ADDR_UNLOCK      IF_ADDR_WUNLOCK
-#endif
 
-#if OS_VER>=VERSION(7,4)
-#if OS_VER>=VERSION(9,2)
 #define RE_PCIEM_LINK_CAP_ASPM        PCIEM_LINK_CAP_ASPM
 #define RE_PCIER_LINK_CTL             PCIER_LINK_CTL
 #define RE_PCIER_LINK_CAP             PCIER_LINK_CAP
-#else //OS_VER>=VERSION(9,2)
-#define RE_PCIEM_LINK_CAP_ASPM        PCIM_LINK_CAP_ASPM
-#define RE_PCIER_LINK_CTL             PCIR_EXPRESS_LINK_CTL
-#define RE_PCIER_LINK_CAP             PCIR_EXPRESS_LINK_CAP
-#endif
-#endif //OS_VER>=VERSION(7,4)
 
 #ifndef IFM_2500_X
 #define	IFM_2500_X	IFM_X(63)
