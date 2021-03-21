@@ -4748,7 +4748,6 @@ static void re_hw_d3_para(struct re_softc *sc)
 */
 static int re_attach(device_t dev)
 {
-        /*int			s;*/
         u_char			eaddr[ETHER_ADDR_LEN];
         u_int32_t		command;
         struct re_softc		*sc;
@@ -4759,8 +4758,6 @@ static int re_attach(device_t dev)
 //	u_int8_t		data8;
         int     reg;
         int		msic=0, msixc=0;
-
-        /*s = splimp();*/
 
         sc = device_get_softc(dev);
         unit = device_get_unit(dev);
@@ -5180,11 +5177,8 @@ static int re_detach(device_t dev)
 {
         struct re_softc		*sc;
         struct ifnet		*ifp;
-        /*int			s;*/
         int			i;
         int			rid;
-
-        /*s = splimp();*/
 
         sc = device_get_softc(dev);
 
@@ -5284,7 +5278,6 @@ static int re_detach(device_t dev)
                 bus_dma_tag_destroy(sc->re_parent_tag);
         }
 
-        /*splx(s);*/
         RE_LOCK_DESTROY(sc);
 
         return(0);
@@ -8541,10 +8534,8 @@ caddr_t			data;
 {
         struct re_softc		*sc = ifp->if_softc;
         struct ifreq		*ifr = (struct ifreq *) data;
-        /*int			s;*/
         int			error = 0;
         int mask, reinit;
-        /*s = splimp();*/
 
         switch(command) {
         case SIOCSIFADDR:
@@ -8676,8 +8667,6 @@ caddr_t			data;
                 error = EINVAL;
                 break;
         }
-
-        /*(void)splx(s);*/
 
         return(error);
 }
@@ -8833,16 +8822,11 @@ void			*xsc;
 {
         /*called per second*/
         struct re_softc		*sc;
-        int			s;
-
-        s = splimp();
 
         sc = xsc;
         /*mii = device_get_softc(sc->re_miibus);
 
         mii_tick(mii);*/
-
-        splx(s);
 
         RE_LOCK(sc);
 
