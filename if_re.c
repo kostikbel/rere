@@ -140,86 +140,86 @@ static struct re_type re_devs[] = {
         { 0, 0, NULL }
 };
 
-static int	re_probe			__P((device_t));
-static int	re_attach			__P((device_t));
-static int	re_detach			__P((device_t));
-static int	re_suspend 			__P((device_t));
-static int	re_resume 			__P((device_t));
-static int	re_shutdown			__P((device_t));
+static int	re_probe(device_t);
+static int	re_attach(device_t);
+static int	re_detach(device_t);
+static int	re_suspend(device_t);
+static int	re_resume(device_t);
+static int	re_shutdown(device_t);
 
-void MP_WritePhyUshort			__P((struct re_softc*, u_int8_t, u_int16_t));
-u_int16_t MP_ReadPhyUshort		__P((struct re_softc*, u_int8_t));
-static void MP_WriteEPhyUshort			__P((struct re_softc*, u_int8_t, u_int16_t));
-static u_int16_t MP_ReadEPhyUshort		__P((struct re_softc*, u_int8_t));
-static u_int8_t MP_ReadEfuse			__P((struct re_softc*, u_int16_t));
-static void MP_RealWritePhyOcpRegWord       __P((struct re_softc*, u_int16_t, u_int16_t));
-static u_int16_t MP_RealReadPhyOcpRegWord   __P((struct re_softc*, u_int16_t));
-static void MP_WritePhyOcpRegWord       __P((struct re_softc*, u_int16_t, u_int8_t, u_int16_t));
-static u_int16_t MP_ReadPhyOcpRegWord   __P((struct re_softc*, u_int16_t, u_int8_t));
-void MP_WriteMcuAccessRegWord    __P((struct re_softc*, u_int16_t, u_int16_t));
-u_int16_t MP_ReadMcuAccessRegWord  __P((struct re_softc*, u_int16_t));
-static void MP_WriteOtherFunPciEConfigSpace    __P((struct re_softc *, u_int8_t, u_int16_t, u_int32_t Regata));
-static u_int32_t MP_ReadOtherFunPciEConfigSpace   __P((struct re_softc *, u_int8_t, u_int16_t));
-static void MP_WritePciEConfigSpace     __P((struct re_softc*, u_int16_t, u_int32_t));
-static u_int32_t MP_ReadPciEConfigSpace __P((struct re_softc*, u_int16_t));
-static u_int8_t MP_ReadByteFun0PciEConfigSpace __P((struct re_softc*, u_int16_t));
-static bool re_set_phy_mcu_patch_request  __P((struct re_softc *));
-static bool re_clear_phy_mcu_patch_request  __P((struct re_softc *));
+void MP_WritePhyUshort(struct re_softc*, u_int8_t, u_int16_t);
+u_int16_t MP_ReadPhyUshort(struct re_softc*, u_int8_t);
+static void MP_WriteEPhyUshort(struct re_softc*, u_int8_t, u_int16_t);
+static u_int16_t MP_ReadEPhyUshort(struct re_softc*, u_int8_t);
+static u_int8_t MP_ReadEfuse(struct re_softc*, u_int16_t);
+static void MP_RealWritePhyOcpRegWord(struct re_softc*, u_int16_t, u_int16_t);
+static u_int16_t MP_RealReadPhyOcpRegWord(struct re_softc*, u_int16_t);
+static void MP_WritePhyOcpRegWord(struct re_softc*, u_int16_t, u_int8_t, u_int16_t);
+static u_int16_t MP_ReadPhyOcpRegWord(struct re_softc*, u_int16_t, u_int8_t);
+void MP_WriteMcuAccessRegWord(struct re_softc*, u_int16_t, u_int16_t);
+u_int16_t MP_ReadMcuAccessRegWord(struct re_softc*, u_int16_t);
+static void MP_WriteOtherFunPciEConfigSpace(struct re_softc *, u_int8_t, u_int16_t, u_int32_t Regata);
+static u_int32_t MP_ReadOtherFunPciEConfigSpace(struct re_softc *, u_int8_t, u_int16_t);
+static void MP_WritePciEConfigSpace(struct re_softc*, u_int16_t, u_int32_t);
+static u_int32_t MP_ReadPciEConfigSpace(struct re_softc*, u_int16_t);
+static u_int8_t MP_ReadByteFun0PciEConfigSpace(struct re_softc*, u_int16_t);
+static bool re_set_phy_mcu_patch_request(struct re_softc *);
+static bool re_clear_phy_mcu_patch_request(struct re_softc *);
 
-static int re_check_dash  __P((struct re_softc *));
+static int re_check_dash(struct re_softc *);
 
-static void re_driver_start             __P((struct re_softc*));
-static void re_driver_stop         	__P((struct re_softc*));
+static void re_driver_start(struct re_softc*);
+static void re_driver_stop(struct re_softc*);
 
-static void re_hw_phy_config		__P((struct re_softc *));
-static void re_init			__P((void *));
-static int  re_var_init			__P((struct re_softc *));
-static void re_reset			__P((struct re_softc *));
-static void re_stop			__P((struct re_softc *));
-static void re_setwol			__P((struct re_softc *));
-static void re_clrwol			__P((struct re_softc *));
-static void re_set_wol_linkspeed 	__P((struct re_softc *));
+static void re_hw_phy_config(struct re_softc *);
+static void re_init(void *);
+static int  re_var_init(struct re_softc *);
+static void re_reset(struct re_softc *);
+static void re_stop(struct re_softc *);
+static void re_setwol(struct re_softc *);
+static void re_clrwol(struct re_softc *);
+static void re_set_wol_linkspeed(struct re_softc *);
 
-static void re_start				__P((struct ifnet *));
-static int re_encap				__P((struct re_softc *, struct mbuf *));
-static void WritePacket				__P((struct re_softc *, caddr_t, int, int, int, uint32_t, uint32_t));
-static int CountFreeTxDescNum			__P((struct re_descriptor));
-static int CountMbufNum				__P((struct mbuf *));
+static void re_start(struct ifnet *);
+static int re_encap(struct re_softc *, struct mbuf *);
+static void WritePacket(struct re_softc *, caddr_t, int, int, int, uint32_t, uint32_t);
+static int CountFreeTxDescNum(struct re_descriptor);
+static int CountMbufNum(struct mbuf *);
 #ifdef RE_FIXUP_RX
-static __inline void re_fixup_rx		__P((struct mbuf *));
+static __inline void re_fixup_rx(struct mbuf *);
 #endif
-static void re_txeof				__P((struct re_softc *));
+static void re_txeof(struct re_softc *);
 
-static void re_rxeof				__P((struct re_softc *));
+static void re_rxeof(struct re_softc *);
 
-static int re_intr				__P((void *));
-static int re_intr_8125				__P((void *));
-static void re_set_multicast_reg	__P((struct re_softc *, u_int32_t, u_int32_t));
-static void re_set_rx_packet_filter_in_sleep_state	__P((struct re_softc *));
-static void re_set_rx_packet_filter	__P((struct re_softc *));
-static void re_setmulti			__P((struct re_softc *));
-static int  re_ioctl			__P((struct ifnet *, u_long, caddr_t));
-static u_int8_t re_link_ok	__P((struct re_softc *));
-static void re_link_on_patch	__P((struct re_softc *));
-static void re_link_down_patch	__P((struct re_softc *));
-static void re_init_timer	__P((struct re_softc *));
-static void re_stop_timer	__P((struct re_softc *));
-static void re_start_timer	__P((struct re_softc *));
-static void re_tick				__P((void *));
+static int re_intr(void *);
+static int re_intr_8125(void *);
+static void re_set_multicast_reg(struct re_softc *, u_int32_t, u_int32_t);
+static void re_set_rx_packet_filter_in_sleep_state(struct re_softc *);
+static void re_set_rx_packet_filter(struct re_softc *);
+static void re_setmulti(struct re_softc *);
+static int  re_ioctl(struct ifnet *, u_long, caddr_t);
+static u_int8_t re_link_ok(struct re_softc *);
+static void re_link_on_patch(struct re_softc *);
+static void re_link_down_patch(struct re_softc *);
+static void re_init_timer(struct re_softc *);
+static void re_stop_timer(struct re_softc *);
+static void re_start_timer(struct re_softc *);
+static void re_tick(void *);
 
-static int  re_ifmedia_upd			__P((struct ifnet *));
-static void re_ifmedia_sts			__P((struct ifnet *, struct ifmediareq *));
+static int  re_ifmedia_upd(struct ifnet *);
+static void re_ifmedia_sts(struct ifnet *, struct ifmediareq *);
 
-static int  re_ifmedia_upd_8125			__P((struct ifnet *));
-static void re_ifmedia_sts_8125			__P((struct ifnet *, struct ifmediareq *));
+static int  re_ifmedia_upd_8125(struct ifnet *);
+static void re_ifmedia_sts_8125(struct ifnet *, struct ifmediareq *);
 
-static void re_eeprom_ShiftOutBits		__P((struct re_softc *, int, int));
-static u_int16_t re_eeprom_ShiftInBits		__P((struct re_softc *));
-static void re_eeprom_EEpromCleanup		__P((struct re_softc *));
-static void re_eeprom_getword			__P((struct re_softc *, int, u_int16_t *));
-static void re_read_eeprom			__P((struct re_softc *, caddr_t, int, int, int));
-static void re_int_task				(void *, int);
-static void re_int_task_8125		(void *, int);
+static void re_eeprom_ShiftOutBits(struct re_softc *, int, int);
+static u_int16_t re_eeprom_ShiftInBits(struct re_softc *);
+static void re_eeprom_EEpromCleanup(struct re_softc *);
+static void re_eeprom_getword(struct re_softc *, int, u_int16_t *);
+static void re_read_eeprom(struct re_softc *, caddr_t, int, int, int);
+static void re_int_task(void *, int);
+static void re_int_task_8125(void *, int);
 
 static void re_phy_power_up(device_t dev);
 static void re_phy_power_down(device_t dev);
