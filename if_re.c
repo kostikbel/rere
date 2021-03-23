@@ -74,8 +74,6 @@ __FBSDID("$FreeBSD: src/sys/dev/re/if_re.c,v " RE_VERSION __DATE__ " " __TIME__ 
 
 #include <net/bpf.h>
 
-#include <vm/vm.h>              /* for vtophys */
-#include <vm/pmap.h>            /* for vtophys */
 #include <machine/clock.h>      /* for DELAY */
 
 #include <machine/bus.h>
@@ -90,23 +88,14 @@ __FBSDID("$FreeBSD: src/sys/dev/re/if_re.c,v " RE_VERSION __DATE__ " " __TIME__ 
 #include <dev/re/if_fiber.h>
 #endif //ENABLE_FIBER_SUPPORT
 
-#if OS_VER < VERSION(5,3)
-#include <pci/pcireg.h>
-#include <pci/pcivar.h>
-#include <machine/bus_pio.h>
-#include <machine/bus_memio.h>
-#else
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
 #include <sys/module.h>
-#endif
 
-#if OS_VER > VERSION(5,9)
 #include <sys/cdefs.h>
 #include <sys/endian.h>
 #include <net/if_types.h>
 #include <net/if_vlan_var.h>
-#endif
 
 #define EE_SET(x)					\
 	CSR_WRITE_1(sc, RE_EECMD,			\
@@ -151,97 +140,86 @@ static struct re_type re_devs[] = {
         { 0, 0, NULL }
 };
 
-static int	re_probe			__P((device_t));
-static int	re_attach			__P((device_t));
-static int	re_detach			__P((device_t));
-static int	re_suspend 			__P((device_t));
-static int	re_resume 			__P((device_t));
-static int	re_shutdown			__P((device_t));
+static int	re_probe(device_t);
+static int	re_attach(device_t);
+static int	re_detach(device_t);
+static int	re_suspend(device_t);
+static int	re_resume(device_t);
+static int	re_shutdown(device_t);
 
-void MP_WritePhyUshort			__P((struct re_softc*, u_int8_t, u_int16_t));
-u_int16_t MP_ReadPhyUshort		__P((struct re_softc*, u_int8_t));
-static void MP_WriteEPhyUshort			__P((struct re_softc*, u_int8_t, u_int16_t));
-static u_int16_t MP_ReadEPhyUshort		__P((struct re_softc*, u_int8_t));
-static u_int8_t MP_ReadEfuse			__P((struct re_softc*, u_int16_t));
-static void MP_RealWritePhyOcpRegWord       __P((struct re_softc*, u_int16_t, u_int16_t));
-static u_int16_t MP_RealReadPhyOcpRegWord   __P((struct re_softc*, u_int16_t));
-static void MP_WritePhyOcpRegWord       __P((struct re_softc*, u_int16_t, u_int8_t, u_int16_t));
-static u_int16_t MP_ReadPhyOcpRegWord   __P((struct re_softc*, u_int16_t, u_int8_t));
-void MP_WriteMcuAccessRegWord    __P((struct re_softc*, u_int16_t, u_int16_t));
-u_int16_t MP_ReadMcuAccessRegWord  __P((struct re_softc*, u_int16_t));
-static void MP_WriteOtherFunPciEConfigSpace    __P((struct re_softc *, u_int8_t, u_int16_t, u_int32_t Regata));
-static u_int32_t MP_ReadOtherFunPciEConfigSpace   __P((struct re_softc *, u_int8_t, u_int16_t));
-static void MP_WritePciEConfigSpace     __P((struct re_softc*, u_int16_t, u_int32_t));
-static u_int32_t MP_ReadPciEConfigSpace __P((struct re_softc*, u_int16_t));
-static u_int8_t MP_ReadByteFun0PciEConfigSpace __P((struct re_softc*, u_int16_t));
-static bool re_set_phy_mcu_patch_request  __P((struct re_softc *));
-static bool re_clear_phy_mcu_patch_request  __P((struct re_softc *));
+void MP_WritePhyUshort(struct re_softc*, u_int8_t, u_int16_t);
+u_int16_t MP_ReadPhyUshort(struct re_softc*, u_int8_t);
+static void MP_WriteEPhyUshort(struct re_softc*, u_int8_t, u_int16_t);
+static u_int16_t MP_ReadEPhyUshort(struct re_softc*, u_int8_t);
+static u_int8_t MP_ReadEfuse(struct re_softc*, u_int16_t);
+static void MP_RealWritePhyOcpRegWord(struct re_softc*, u_int16_t, u_int16_t);
+static u_int16_t MP_RealReadPhyOcpRegWord(struct re_softc*, u_int16_t);
+static void MP_WritePhyOcpRegWord(struct re_softc*, u_int16_t, u_int8_t, u_int16_t);
+static u_int16_t MP_ReadPhyOcpRegWord(struct re_softc*, u_int16_t, u_int8_t);
+void MP_WriteMcuAccessRegWord(struct re_softc*, u_int16_t, u_int16_t);
+u_int16_t MP_ReadMcuAccessRegWord(struct re_softc*, u_int16_t);
+static void MP_WriteOtherFunPciEConfigSpace(struct re_softc *, u_int8_t, u_int16_t, u_int32_t Regata);
+static u_int32_t MP_ReadOtherFunPciEConfigSpace(struct re_softc *, u_int8_t, u_int16_t);
+static void MP_WritePciEConfigSpace(struct re_softc*, u_int16_t, u_int32_t);
+static u_int32_t MP_ReadPciEConfigSpace(struct re_softc*, u_int16_t);
+static u_int8_t MP_ReadByteFun0PciEConfigSpace(struct re_softc*, u_int16_t);
+static bool re_set_phy_mcu_patch_request(struct re_softc *);
+static bool re_clear_phy_mcu_patch_request(struct re_softc *);
 
-static int re_check_dash  __P((struct re_softc *));
+static int re_check_dash(struct re_softc *);
 
-static void re_driver_start             __P((struct re_softc*));
-static void re_driver_stop         	__P((struct re_softc*));
+static void re_driver_start(struct re_softc*);
+static void re_driver_stop(struct re_softc*);
 
-static void re_hw_phy_config		__P((struct re_softc *));
-static void re_init			__P((void *));
-static int  re_var_init			__P((struct re_softc *));
-static void re_reset			__P((struct re_softc *));
-static void re_stop			__P((struct re_softc *));
-static void re_setwol			__P((struct re_softc *));
-static void re_clrwol			__P((struct re_softc *));
-static void re_set_wol_linkspeed 	__P((struct re_softc *));
+static void re_hw_phy_config(struct re_softc *);
+static void re_init(void *);
+static int  re_var_init(struct re_softc *);
+static void re_reset(struct re_softc *);
+static void re_stop(struct re_softc *);
+static void re_setwol(struct re_softc *);
+static void re_clrwol(struct re_softc *);
+static void re_set_wol_linkspeed(struct re_softc *);
 
-static void re_start				__P((struct ifnet *));
-static int re_encap				__P((struct re_softc *, struct mbuf *));
-static void WritePacket				__P((struct re_softc *, caddr_t, int, int, int, uint32_t, uint32_t));
-static int CountFreeTxDescNum			__P((struct re_descriptor));
-static int CountMbufNum				__P((struct mbuf *));
+static void re_start(struct ifnet *);
+static int re_encap(struct re_softc *, struct mbuf *);
+static void WritePacket(struct re_softc *, caddr_t, int, int, int, uint32_t, uint32_t);
+static int CountFreeTxDescNum(struct re_descriptor);
+static int CountMbufNum(struct mbuf *);
 #ifdef RE_FIXUP_RX
-static __inline void re_fixup_rx		__P((struct mbuf *));
+static __inline void re_fixup_rx(struct mbuf *);
 #endif
-static void re_txeof				__P((struct re_softc *));
+static void re_txeof(struct re_softc *);
 
-static void re_rxeof				__P((struct re_softc *));
+static void re_rxeof(struct re_softc *);
 
-#if OS_VER < VERSION(7,0)
-static void re_intr				__P((void *));
-#else
-static int re_intr				__P((void *));
-#endif //OS_VER < VERSION(7,0)
-#if OS_VER < VERSION(7,0)
-static void re_intr_8125				__P((void *));
-#else
-static int re_intr_8125				__P((void *));
-#endif //OS_VER < VERSION(7,0)
-static void re_set_multicast_reg	__P((struct re_softc *, u_int32_t, u_int32_t));
-static void re_set_rx_packet_filter_in_sleep_state	__P((struct re_softc *));
-static void re_set_rx_packet_filter	__P((struct re_softc *));
-static void re_setmulti			__P((struct re_softc *));
-static int  re_ioctl			__P((struct ifnet *, u_long, caddr_t));
-static u_int8_t re_link_ok	__P((struct re_softc *));
-static void re_link_on_patch	__P((struct re_softc *));
-static void re_link_down_patch	__P((struct re_softc *));
-static void re_init_timer	__P((struct re_softc *));
-static void re_stop_timer	__P((struct re_softc *));
-static void re_start_timer	__P((struct re_softc *));
-static void re_tick				__P((void *));
-#if OS_VER < VERSION(7,0)
-static void re_watchdog				__P((struct ifnet *));
-#endif
+static int re_intr(void *);
+static int re_intr_8125(void *);
+static void re_set_multicast_reg(struct re_softc *, u_int32_t, u_int32_t);
+static void re_set_rx_packet_filter_in_sleep_state(struct re_softc *);
+static void re_set_rx_packet_filter(struct re_softc *);
+static void re_setmulti(struct re_softc *);
+static int  re_ioctl(struct ifnet *, u_long, caddr_t);
+static u_int8_t re_link_ok(struct re_softc *);
+static void re_link_on_patch(struct re_softc *);
+static void re_link_down_patch(struct re_softc *);
+static void re_init_timer(struct re_softc *);
+static void re_stop_timer(struct re_softc *);
+static void re_start_timer(struct re_softc *);
+static void re_tick(void *);
 
-static int  re_ifmedia_upd			__P((struct ifnet *));
-static void re_ifmedia_sts			__P((struct ifnet *, struct ifmediareq *));
+static int  re_ifmedia_upd(struct ifnet *);
+static void re_ifmedia_sts(struct ifnet *, struct ifmediareq *);
 
-static int  re_ifmedia_upd_8125			__P((struct ifnet *));
-static void re_ifmedia_sts_8125			__P((struct ifnet *, struct ifmediareq *));
+static int  re_ifmedia_upd_8125(struct ifnet *);
+static void re_ifmedia_sts_8125(struct ifnet *, struct ifmediareq *);
 
-static void re_eeprom_ShiftOutBits		__P((struct re_softc *, int, int));
-static u_int16_t re_eeprom_ShiftInBits		__P((struct re_softc *));
-static void re_eeprom_EEpromCleanup		__P((struct re_softc *));
-static void re_eeprom_getword			__P((struct re_softc *, int, u_int16_t *));
-static void re_read_eeprom			__P((struct re_softc *, caddr_t, int, int, int));
-static void re_int_task				(void *, int);
-static void re_int_task_8125		(void *, int);
+static void re_eeprom_ShiftOutBits(struct re_softc *, int, int);
+static u_int16_t re_eeprom_ShiftInBits(struct re_softc *);
+static void re_eeprom_EEpromCleanup(struct re_softc *);
+static void re_eeprom_getword(struct re_softc *, int, u_int16_t *);
+static void re_read_eeprom(struct re_softc *, caddr_t, int, int, int);
+static void re_int_task(void *, int);
+static void re_int_task_8125(void *, int);
 
 static void re_phy_power_up(device_t dev);
 static void re_phy_power_down(device_t dev);
@@ -3417,29 +3395,9 @@ static void Dash2DisableTxRx(struct re_softc *sc)
 }
 
 static inline bool
-is_zero_ether_addr(const u_int8_t * addr)
-{
-        return ((addr[0] + addr[1] + addr[2] + addr[3] + addr[4] + addr[5]) == 0x00);
-}
-
-static inline bool
-is_multicast_ether_addr(const u_int8_t * addr)
-{
-        return (0x01 & addr[0]);
-}
-
-/*
-static inline bool
-is_broadcast_ether_addr(const u_int8_t * addr)
-{
-        return ((addr[0] + addr[1] + addr[2] + addr[3] + addr[4] + addr[5]) == (6 * 0xff));
-}
-*/
-
-static inline bool
 is_valid_ether_addr(const u_int8_t * addr)
 {
-        return !is_multicast_ether_addr(addr) && !is_zero_ether_addr(addr);
+        return !ETHER_IS_MULTICAST(addr) && !ETHER_IS_ZERO(addr);
 }
 
 static void re_disable_now_is_oob(struct re_softc *sc)
@@ -4770,7 +4728,6 @@ static void re_hw_d3_para(struct re_softc *sc)
 */
 static int re_attach(device_t dev)
 {
-        /*int			s;*/
         u_char			eaddr[ETHER_ADDR_LEN];
         u_int32_t		command;
         struct re_softc		*sc;
@@ -4781,8 +4738,6 @@ static int re_attach(device_t dev)
 //	u_int8_t		data8;
         int     reg;
         int		msic=0, msixc=0;
-
-        /*s = splimp();*/
 
         sc = device_get_softc(dev);
         unit = device_get_unit(dev);
@@ -4849,7 +4804,6 @@ static int re_attach(device_t dev)
 
         re_init_software_variable(sc);
 
-#if OS_VER >= VERSION(7,0)
         msic = pci_msi_count(dev);
         msixc = pci_msix_count(dev);
         if (pci_find_cap(dev, PCIY_EXPRESS, &reg) == 0) {
@@ -4913,7 +4867,6 @@ static int re_attach(device_t dev)
                 if ((sc->re_if_flags & RL_FLAG_MSI) == 0)
                         msic = 0;
         }
-#endif //OS_VER >= VERSION(7,0)
 
         if ((sc->re_if_flags & (RL_FLAG_MSI | RL_FLAG_MSIX)) == 0) {
                 rid = 0;
@@ -4939,7 +4892,6 @@ static int re_attach(device_t dev)
                 }
         }
 
-#if OS_VER >= VERSION(7,3)
         /* Disable ASPM L0S/L1 and Clock Request. */
         if (sc->re_expcap != 0) {
                 u_int32_t		cap, ctl;
@@ -4957,7 +4909,6 @@ static int re_attach(device_t dev)
                 } else
                         device_printf(dev, "no ASPM capability\n");
         }
-#endif //OS_VER >= VERSION(7,3)
 
         re_init_timer(sc);
 
@@ -4989,20 +4940,12 @@ static int re_attach(device_t dev)
 
         sc->re_unit = unit;
 
-#if OS_VER < VERSION(6,0)
-        bcopy(eaddr, (char *)&sc->arpcom.ac_enaddr, ETHER_ADDR_LEN);
-#endif
-
         if (sc->re_type == MACFG_3) {	/* Change PCI Latency time*/
                 pci_write_config(dev, RE_PCI_LATENCY_TIMER, 0x40, 1);
         }
 
         error = bus_dma_tag_create(
-#if OS_VER < VERSION(7,0)
-                        NULL,
-#else
                         bus_get_dma_tag(dev),		/* parent */
-#endif
                         1, 0,		/* alignment, boundary */
                         BUS_SPACE_MAXADDR,		/* lowaddr */
                         BUS_SPACE_MAXADDR,		/* highaddr */
@@ -5072,31 +5015,21 @@ static int re_attach(device_t dev)
         sc->re_tx_cstag =1;
         sc->re_rx_cstag =1;
 
-#if OS_VER < VERSION(6,0)
-        ifp = &sc->arpcom.ac_if;
-#else
         ifp = sc->re_ifp = if_alloc(IFT_ETHER);
         if (ifp == NULL) {
                 device_printf(dev, "can not if_alloc()\n");
                 error = ENOSPC;
                 goto fail;
         }
-#endif
+
         ifp->if_softc = sc;
-#if OS_VER < VERSION(5,3)
-        ifp->if_unit = unit;
-        ifp->if_name = "re";
-#else
         if_initname(ifp, device_get_name(dev), device_get_unit(dev));
-#endif
         ifp->if_mtu = ETHERMTU;
         ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
         ifp->if_ioctl = re_ioctl;
         ifp->if_output = ether_output;
         ifp->if_start = re_start;
-#if OS_VER < VERSION(7,0)
-        ifp->if_watchdog = re_watchdog;
-#endif
+
         if ((sc->re_type == MACFG_24) || (sc->re_type == MACFG_25) || (sc->re_type == MACFG_26))
                 ifp->if_hwassist |= CSUM_TCP | CSUM_UDP;
         else
@@ -5164,34 +5097,18 @@ static int re_attach(device_t dev)
                 sc->hw_start_unlock = re_hw_start_unlock;
         }
 
-#if OS_VER>=VERSION(7,0)
         TASK_INIT(&sc->re_inttask, 0, sc->int_task, sc);
-#endif
 
         /*
          * Call MI attach routine.
          */
-        /*#if OS_VER < VERSION(5, 1)*/
-#if OS_VER < VERSION(4,9)
-        ether_ifattach(ifp, ETHER_BPF_SUPPORTED);
-#else
         ether_ifattach(ifp, eaddr);
-#endif
 
-#if OS_VER < VERSION(7,0)
-        error = bus_setup_intr(dev, sc->re_irq, INTR_TYPE_NET,
-                               sc->intr, sc, &sc->re_intrhand);
-#else
         error = bus_setup_intr(dev, sc->re_irq, INTR_TYPE_NET|INTR_MPSAFE,
                                sc->intr, NULL, sc, &sc->re_intrhand);
-#endif
 
         if (error) {
-#if OS_VER < VERSION(4,9)
-                ether_ifdetach(ifp, ETHER_BPF_SUPPORTED);
-#else
                 ether_ifdetach(ifp);
-#endif
                 device_printf(dev,"couldn't set up irq\n");
                 goto fail;
         }
@@ -5240,11 +5157,8 @@ static int re_detach(device_t dev)
 {
         struct re_softc		*sc;
         struct ifnet		*ifp;
-        /*int			s;*/
         int			i;
         int			rid;
-
-        /*s = splimp();*/
 
         sc = device_get_softc(dev);
 
@@ -5255,14 +5169,8 @@ static int re_detach(device_t dev)
                 RE_LOCK(sc);
                 re_stop(sc);
                 RE_UNLOCK(sc);
-#if OS_VER>=VERSION(7,0)
                 taskqueue_drain(taskqueue_fast, &sc->re_inttask);
-#endif
-#if OS_VER < VERSION(4,9)
-                ether_ifdetach(ifp, ETHER_BPF_SUPPORTED);
-#else
                 ether_ifdetach(ifp);
-#endif
         }
 
         bus_generic_detach(dev);
@@ -5272,10 +5180,8 @@ static int re_detach(device_t dev)
         if (sc->re_intrhand)
                 bus_teardown_intr(dev, sc->re_irq, sc->re_intrhand);
 
-#if OS_VER>=VERSION(6,0)
         if (ifp)
                 if_free(ifp);
-#endif
 
         if ((sc->re_if_flags & (RL_FLAG_MSI | RL_FLAG_MSIX)) == 0)
                 rid = 0;
@@ -5352,7 +5258,6 @@ static int re_detach(device_t dev)
                 bus_dma_tag_destroy(sc->re_parent_tag);
         }
 
-        /*splx(s);*/
         RE_LOCK_DESTROY(sc);
 
         return(0);
@@ -5361,11 +5266,7 @@ static int re_detach(device_t dev)
 static void
 re_link_state_change(struct ifnet *ifp, int link_state)
 {
-#if OS_VER>=VERSION(6,0)
         if_link_state_change(ifp, link_state);
-#else
-        ifp->if_link_state = link_state
-#endif
 }
 
 /*
@@ -7045,9 +6946,7 @@ static void re_init_unlock(void *xsc)  	/* Software & Hardware Initialize */
 {
         struct re_softc		*sc = xsc;
         struct ifnet		*ifp;
-#if OS_VER < VERSION(6,0)
-        int			i;
-#endif
+
         union {
                 uint32_t align_dummy;
                 u_char eaddr[ETHER_ADDR_LEN];
@@ -7061,13 +6960,7 @@ static void re_init_unlock(void *xsc)  	/* Software & Hardware Initialize */
         re_stop(sc);
 
         /* Copy MAC address on stack to align. */
-#if OS_VER < VERSION(6,0)
-        bcopy((char *)&sc->arpcom.ac_enaddr, eaddr.eaddr, ETHER_ADDR_LEN);
-#elif OS_VER < VERSION(7,0)
-        bcopy(IFP2ENADDR(ifp), eaddr.eaddr, ETHER_ADDR_LEN);
-#else
         bcopy(IF_LLADDR(ifp), eaddr.eaddr, ETHER_ADDR_LEN);
-#endif
 
         /* Init our MAC address */
         re_rar_set(sc, eaddr.eaddr);
@@ -7770,9 +7663,6 @@ static void re_stop(struct re_softc *sc)  	/* Stop Driver */
         /*	RE_LOCK_ASSERT(sc);*/
 
         ifp = RE_GET_IFNET(sc);
-#if OS_VER < VERSION(9,0)
-        ifp->if_timer = 0;
-#endif
 
         re_stop_timer(sc);
 
@@ -7872,14 +7762,7 @@ static void re_start(struct ifnet *ifp)  	/* Transmit Packet*/
                 }
 
                 if (ifp->if_bpf) {		/* If there's a BPF listener, bounce a copy of this frame to him. */
-                        //printf("If there's a BPF listener, bounce a copy of this frame to him. \n");
-
-                        /*#if OS_VER < VERSION(5, 1)*/
-#if OS_VER < VERSION(4,9)
-                        bpf_mtap(ifp, m_head);
-#else
                         bpf_mtap(ifp->if_bpf, m_head);
-#endif
                 }
 
                 //hw checksum
@@ -7932,9 +7815,6 @@ static void re_start(struct ifnet *ifp)  	/* Transmit Packet*/
                 printf("\n");
 #endif
         }
-#if OS_VER < VERSION(9,0)
-        ifp->if_timer = 5;
-#endif
 
         RE_UNLOCK(sc);
 
@@ -8075,11 +7955,6 @@ static void re_txeof(struct re_softc *sc)  	/* Transmit OK/ERR handler */
 
         ifp = RE_GET_IFNET(sc);
 
-#if OS_VER < VERSION(9,0)
-        /* Clear the timeout timer. */
-        ifp->if_timer = 0;
-#endif
-
         bus_dmamap_sync(sc->re_desc.tx_desc_tag,
                         sc->re_desc.tx_desc_dmamap,
                         BUS_DMASYNC_POSTREAD|BUS_DMASYNC_POSTWRITE);
@@ -8104,15 +7979,7 @@ static void re_txeof(struct re_softc *sc)  	/* Transmit OK/ERR handler */
                 }
 
                 sc->re_desc.tx_last_index = (sc->re_desc.tx_last_index+1)%RE_TX_BUF_NUM;
-#if OS_VER < VERSION(11,0)
-                if (txstat & (RL_TDESC_STAT_EXCESSCOL|
-                              RL_TDESC_STAT_COLCNT))
-                        ifp->if_collisions++;
-                if (txstat & RL_TDESC_STAT_TXERRSUM)
-                        ifp->if_oerrors++;
-                else
-                        ifp->if_opackets++;
-#else
+
                 if (txstat & (RL_TDESC_STAT_EXCESSCOL|
                               RL_TDESC_STAT_COLCNT))
                         if_inc_counter(ifp, IFCOUNTER_COLLISIONS, 1);
@@ -8120,7 +7987,7 @@ static void re_txeof(struct re_softc *sc)  	/* Transmit OK/ERR handler */
                         if_inc_counter(ifp, IFCOUNTER_OERRORS, 1);
                 else
                         if_inc_counter(ifp, IFCOUNTER_OPACKETS, 1);
-#endif
+
                 ifp->if_drv_flags &= ~IFF_DRV_OACTIVE;
         }
 
@@ -8187,11 +8054,9 @@ struct re_softc		*sc;
                 /* Check if this packet is received correctly*/
                 if (opts1&0x200000) {	/*Check RES bit*/
                         bError=1;
-#if OS_VER < VERSION(11,0)
-                        ifp->if_ierrors++;
-#else
+
                         if_inc_counter(ifp, IFCOUNTER_IERRORS, 1);
-#endif
+
                         goto update_desc;
                 }
                 opts2 = le32toh(rxptr->ul[1]);
@@ -8208,11 +8073,9 @@ struct re_softc		*sc;
                 buf = m_getjcl(M_DONTWAIT, MT_DATA, M_PKTHDR, size);
                 if (buf==NULL) {
                         bError=1;
-#if OS_VER < VERSION(11,0)
-                        ifp->if_iqdrops++;
-#else
+
                         if_inc_counter(ifp, IFCOUNTER_IQDROPS, 1);
-#endif
+
                         goto update_desc;
                 }
 
@@ -8275,25 +8138,17 @@ struct re_softc		*sc;
                 }
 
                 eh = mtod(m, struct ether_header *);
-#if OS_VER < VERSION(11,0)
-                ifp->if_ipackets++;
-#else
+
                 if_inc_counter(ifp, IFCOUNTER_IPACKETS, 1);
-#endif
+
 #ifdef _DEBUG_
                 printf("Rcv Packet, Len=%d \n", m->m_len);
 #endif
 
                 RE_UNLOCK(sc);
 
-                /*#if OS_VER < VERSION(5, 1)*/
-#if OS_VER < VERSION(4,9)
-                /* Remove header from mbuf and pass it on. */
-                m_adj(m, sizeof(struct ether_header));
-                ether_input(ifp, eh, m);
-#else
                 (*ifp->if_input)(ifp, m);
-#endif
+
                 RE_LOCK(sc);
 
 update_desc:
@@ -8331,11 +8186,7 @@ update_desc:
         return;
 }
 
-#if OS_VER < VERSION(7,0)
-static void re_intr(void *arg)  	/* Interrupt Handler */
-#else
 static int re_intr(void *arg)  	/* Interrupt Handler */
-#endif //OS_VER < VERSION(7,0)
 {
         struct re_softc		*sc;
 
@@ -8343,34 +8194,18 @@ static int re_intr(void *arg)  	/* Interrupt Handler */
 
         if ((sc->re_if_flags & (RL_FLAG_MSI | RL_FLAG_MSIX)) == 0) {
                 if ((CSR_READ_2(sc, RE_ISR) & RE_INTRS) == 0) {
-#if OS_VER < VERSION(7,0)
-                        return;
-#else
                         return (FILTER_STRAY);
-#endif
                 }
         }
 
         /* Disable interrupts. */
         CSR_WRITE_2(sc, RE_IMR, 0x0000);
 
-#if OS_VER < VERSION(7,0)
-        re_int_task(arg, 0);
-#else //OS_VER < VERSION(7,0)
-#if OS_VER < VERSION(11,0)
-        taskqueue_enqueue_fast(taskqueue_fast, &sc->re_inttask);
-#else ////OS_VER < VERSION(11,0)
         taskqueue_enqueue(taskqueue_fast, &sc->re_inttask);
-#endif //OS_VER < VERSION(11,0)
         return (FILTER_HANDLED);
-#endif //OS_VER < VERSION(7,0)
 }
 
-#if OS_VER < VERSION(7,0)
-static void re_intr_8125(void *arg)  	/* Interrupt Handler */
-#else
 static int re_intr_8125(void *arg)  	/* Interrupt Handler */
-#endif //OS_VER < VERSION(7,0)
 {
         struct re_softc		*sc;
 
@@ -8378,27 +8213,15 @@ static int re_intr_8125(void *arg)  	/* Interrupt Handler */
 
         if ((sc->re_if_flags & (RL_FLAG_MSI | RL_FLAG_MSIX)) == 0) {
                 if ((CSR_READ_4(sc, RE_ISR0_8125) & RE_INTRS) == 0) {
-#if OS_VER < VERSION(7,0)
-                        return;
-#else
                         return (FILTER_STRAY);
-#endif
                 }
         }
 
         /* Disable interrupts. */
         CSR_WRITE_4(sc, RE_IMR0_8125, 0x00000000);
 
-#if OS_VER < VERSION(7,0)
-        re_int_task_8125(arg, 0);
-#else //OS_VER < VERSION(7,0)
-#if OS_VER < VERSION(11,0)
-        taskqueue_enqueue_fast(taskqueue_fast, &sc->re_inttask);
-#else ////OS_VER < VERSION(11,0)
         taskqueue_enqueue(taskqueue_fast, &sc->re_inttask);
-#endif //OS_VER < VERSION(11,0)
         return (FILTER_HANDLED);
-#endif //OS_VER < VERSION(7,0)
 }
 
 static void re_int_task(void *arg, int npending)
@@ -8473,16 +8296,10 @@ static void re_int_task(void *arg, int npending)
         if (!IFQ_DRV_IS_EMPTY(&ifp->if_snd))
                 re_start(ifp);
 
-#if OS_VER>=VERSION(7,0)
         if (CSR_READ_2(sc, RE_ISR) & RE_INTRS) {
-#if OS_VER < VERSION(11,0)
-                taskqueue_enqueue_fast(taskqueue_fast, &sc->re_inttask);
-#else ////OS_VER < VERSION(11,0)
                 taskqueue_enqueue(taskqueue_fast, &sc->re_inttask);
-#endif //OS_VER < VERSION(11,0)
                 return;
         }
-#endif //OS_VER>=VERSION(7,0)
 
         /* Re-enable interrupts. */
         CSR_WRITE_2(sc, RE_IMR, RE_INTRS);
@@ -8526,16 +8343,10 @@ static void re_int_task_8125(void *arg, int npending)
         if (!IFQ_DRV_IS_EMPTY(&ifp->if_snd))
                 re_start(ifp);
 
-#if OS_VER>=VERSION(7,0)
         if (CSR_READ_4(sc, RE_ISR0_8125) & RE_INTRS) {
-#if OS_VER < VERSION(11,0)
-                taskqueue_enqueue_fast(taskqueue_fast, &sc->re_inttask);
-#else ////OS_VER < VERSION(11,0)
                 taskqueue_enqueue(taskqueue_fast, &sc->re_inttask);
-#endif //OS_VER < VERSION(11,0)
                 return;
         }
-#endif //OS_VER>=VERSION(7,0)
 
         /* Re-enable interrupts. */
         CSR_WRITE_4(sc, RE_IMR0_8125, RE_INTRS);
@@ -8665,20 +8476,8 @@ struct re_softc		*sc;
 #if OS_VER >= VERSION(13,0)
 	mcnt = if_foreach_llmaddr(ifp, re_hash_maddr, hashes);
 #else
-#if OS_VER >= VERSION(12,0)
 	if_maddr_rlock(ifp);
-#elif OS_VER > VERSION(6,0)
-        IF_ADDR_LOCK(ifp);
-#endif
-#if OS_VER < VERSION(4,9)
-        for (ifma = ifp->if_multiaddrs.lh_first; ifma != NULL;
-             ifma = ifma->ifma_link.le_next)
-#elif OS_VER < VERSION(12,0)
-        TAILQ_FOREACH(ifma,&ifp->if_multiaddrs,ifma_link)
-#else
-        CK_STAILQ_FOREACH(ifma,&ifp->if_multiaddrs,ifma_link)
-#endif
-        {
+        CK_STAILQ_FOREACH(ifma,&ifp->if_multiaddrs,ifma_link) {
                 if (ifma->ifma_addr->sa_family != AF_LINK)
                         continue;
                 h = ether_crc32_be(LLADDR((struct sockaddr_dl *)
@@ -8689,11 +8488,7 @@ struct re_softc		*sc;
                         hashes[1] |= (1 << (h - 32));
                 mcnt++;
         }
-#if OS_VER >= VERSION(12,0)
 	if_maddr_runlock(ifp);
-#elif OS_VER > VERSION(6,0)
-        IF_ADDR_UNLOCK(ifp);
-#endif
 #endif
 
         if (mcnt) {
@@ -8719,10 +8514,8 @@ caddr_t			data;
 {
         struct re_softc		*sc = ifp->if_softc;
         struct ifreq		*ifr = (struct ifreq *) data;
-        /*int			s;*/
         int			error = 0;
         int mask, reinit;
-        /*s = splimp();*/
 
         switch(command) {
         case SIOCSIFADDR:
@@ -8854,8 +8647,6 @@ caddr_t			data;
                 error = EINVAL;
                 break;
         }
-
-        /*(void)splx(s);*/
 
         return(error);
 }
@@ -8993,30 +8784,17 @@ static void re_check_link_status(struct re_softc *sc)
 
 static void re_init_timer(struct re_softc *sc)
 {
-#ifdef RE_USE_NEW_CALLOUT_FUN
         callout_init(&sc->re_stat_ch, CALLOUT_MPSAFE);
-#else
-        callout_handle_init(&sc->re_stat_ch);
-#endif
 }
 
 static void re_stop_timer(struct re_softc *sc)
 {
-#ifdef RE_USE_NEW_CALLOUT_FUN
         callout_stop(&sc->re_stat_ch);
-#else
-        untimeout(re_tick, sc, sc->re_stat_ch);
-#endif
 }
 
 static void re_start_timer(struct re_softc *sc)
 {
-#ifdef RE_USE_NEW_CALLOUT_FUN
         callout_reset(&sc->re_stat_ch, hz, re_tick, sc);
-#else
-        re_stop_timer(sc);
-        sc->re_stat_ch = timeout(re_tick, sc, hz);
-#endif
 }
 
 static void re_tick(xsc)
@@ -9024,16 +8802,11 @@ void			*xsc;
 {
         /*called per second*/
         struct re_softc		*sc;
-        int			s;
-
-        s = splimp();
 
         sc = xsc;
         /*mii = device_get_softc(sc->re_miibus);
 
         mii_tick(mii);*/
-
-        splx(s);
 
         RE_LOCK(sc);
 
@@ -9046,29 +8819,6 @@ void			*xsc;
 
         return;
 }
-
-#if OS_VER < VERSION(7,0)
-static void re_watchdog(ifp)
-struct ifnet		*ifp;
-{
-        struct re_softc		*sc;
-
-        sc = ifp->if_softc;
-
-        printf("re%d: watchdog timeout\n", sc->re_unit);
-#if OS_VER < VERSION(11,0)
-        ifp->if_oerrors++;
-#else
-        if_inc_counter(ifp, IFCOUNTER_OERRORS, 1);
-#endif
-
-        re_txeof(sc);
-        re_rxeof(sc);
-        re_init(sc);
-
-        return;
-}
-#endif
 
 /*
  * Set media options.
@@ -9107,11 +8857,7 @@ static int re_ifmedia_upd(struct ifnet *ifp)
                        GTCR_ADV_1000THDX;
                 break;
         case IFM_1000_SX:
-#if OS_VER < 500000
-        case IFM_1000_TX:
-#else
         case IFM_1000_T:
-#endif
                 anar = ANAR_TX_FD |
                        ANAR_TX |
                        ANAR_10_FD |
@@ -9210,11 +8956,7 @@ static int re_ifmedia_upd_8125(struct ifnet *ifp)
                        GTCR_ADV_1000THDX;
                 break;
         case IFM_1000_SX:
-#if OS_VER < 500000
-        case IFM_1000_TX:
-#else
         case IFM_1000_T:
-#endif
                 anar = ANAR_TX_FD |
                        ANAR_TX |
                        ANAR_10_FD |
