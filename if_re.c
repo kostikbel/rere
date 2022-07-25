@@ -47,7 +47,7 @@
 #else
 #define FIBER_SUFFIX ""
 #endif
-#define RE_VERSION "1.96.04" FIBER_SUFFIX
+#define RE_VERSION "1.97.00" FIBER_SUFFIX
 
 __FBSDID("$FreeBSD: src/sys/dev/re/if_re.c,v " RE_VERSION __DATE__ " " __TIME__ "  wpaul Exp $");
 
@@ -108,6 +108,12 @@ __FBSDID("$FreeBSD: src/sys/dev/re/if_re.c,v " RE_VERSION __DATE__ " " __TIME__ 
 #include <net/if_vlan_var.h>
 #endif
 
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/ip6.h>
+
+#include <machine/in_cksum.h>
+
 #define EE_SET(x)					\
 	CSR_WRITE_1(sc, RE_EECMD,			\
 		CSR_READ_1(sc, RE_EECMD) | x)
@@ -134,6 +140,10 @@ static struct re_type re_devs[] = {
         },
         {
                 RT_VENDORID, RT_DEVICEID_8161,
+                "Realtek PCIe GbE Family Controller"
+        },
+        {
+                RT_VENDORID, RT_DEVICEID_8162,
                 "Realtek PCIe GbE Family Controller"
         },
         {
@@ -173,7 +183,7 @@ static void MP_WriteOtherFunPciEConfigSpace    __P((struct re_softc *, u_int8_t,
 static u_int32_t MP_ReadOtherFunPciEConfigSpace   __P((struct re_softc *, u_int8_t, u_int16_t));
 static void MP_WritePciEConfigSpace     __P((struct re_softc*, u_int16_t, u_int32_t));
 static u_int32_t MP_ReadPciEConfigSpace __P((struct re_softc*, u_int16_t));
-static u_int8_t MP_ReadByteFun0PciEConfigSpace __P((struct re_softc*, u_int16_t));
+//static u_int8_t MP_ReadByteFun0PciEConfigSpace __P((struct re_softc*, u_int16_t));
 static bool re_set_phy_mcu_patch_request  __P((struct re_softc *));
 static bool re_clear_phy_mcu_patch_request  __P((struct re_softc *));
 
@@ -193,6 +203,7 @@ static void re_set_wol_linkspeed 	__P((struct re_softc *));
 
 static void re_start				__P((struct ifnet *));
 static int re_encap				__P((struct re_softc *, struct mbuf *));
+static int re_8125_pad				__P((struct re_softc *, struct mbuf *));
 static void WritePacket				__P((struct re_softc *, caddr_t, int, int, int, uint32_t, uint32_t));
 static int CountFreeTxDescNum			__P((struct re_descriptor));
 static int CountMbufNum				__P((struct mbuf *));
@@ -579,6 +590,8 @@ device_t		dev;
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
         case MACFG_80:
         case MACFG_81:
         case MACFG_82:
@@ -679,6 +692,8 @@ device_t		dev;
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
                 CSR_WRITE_1(sc, 0xD0, CSR_READ_1(sc, 0xD0) & ~BIT_6);
                 CSR_WRITE_1(sc, 0xF2, CSR_READ_1(sc, 0xF2) & ~BIT_6);
                 break;
@@ -1032,17 +1047,50 @@ static void re_disable_cfg9346_write(struct re_softc *sc)
 
 static void DisableMcuBPs(struct re_softc *sc)
 {
+        u_int16_t regAddr;
+
+        switch(sc->re_type) {
+        case MACFG_56:
+        case MACFG_57:
+        case MACFG_58:
+        case MACFG_59:
+        case MACFG_60:
+        case MACFG_61:
+        case MACFG_62:
+        case MACFG_67:
+        case MACFG_68:
+        case MACFG_69:
+        case MACFG_70:
+        case MACFG_71:
+        case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
+        case MACFG_80:
+        case MACFG_81:
+        case MACFG_82:
+        case MACFG_83:
+                re_enable_cfg9346_write(sc);
+                CSR_WRITE_1(sc, RE_CFG5, CSR_READ_1(sc, RE_CFG5) & ~BIT_0);
+                CSR_WRITE_1(sc, RE_CFG2, CSR_READ_1(sc, RE_CFG2) & ~BIT_7);
+                re_disable_cfg9346_write(sc);
+                break;
+        }
+
         switch(sc->re_type) {
         case MACFG_68:
         case MACFG_69:
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
+                MP_WriteMcuAccessRegWord(sc, 0xFC38, 0x0000);
+                break;
         case MACFG_80:
         case MACFG_81:
         case MACFG_82:
         case MACFG_83:
-                MP_WriteMcuAccessRegWord(sc, 0xFC38, 0x0000);
+                MP_WriteMcuAccessRegWord(sc, 0xFC48, 0x0000);
                 break;
         }
 
@@ -1060,11 +1108,8 @@ static void DisableMcuBPs(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
-                re_enable_cfg9346_write(sc);
-                CSR_WRITE_1(sc, RE_CFG5, CSR_READ_1(sc, RE_CFG5) & ~BIT_0);
-                CSR_WRITE_1(sc, RE_CFG2, CSR_READ_1(sc, RE_CFG2) & ~BIT_7);
-                re_disable_cfg9346_write(sc);
-
+        case MACFG_73:
+        case MACFG_74:
                 MP_WriteMcuAccessRegWord(sc, 0xFC28, 0x0000);
                 MP_WriteMcuAccessRegWord(sc, 0xFC2A, 0x0000);
                 MP_WriteMcuAccessRegWord(sc, 0xFC2C, 0x0000);
@@ -1078,11 +1123,101 @@ static void DisableMcuBPs(struct re_softc *sc)
 
                 MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x0000);
                 break;
+        case MACFG_80:
+        case MACFG_81:
+        case MACFG_82:
+        case MACFG_83:
+                for (regAddr = 0xFC28; regAddr < 0xFC48; regAddr += 2) {
+                        MP_WriteMcuAccessRegWord(sc, regAddr, 0x0000);
+                }
+
+                DELAY(3000);
+
+                MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x0000);
+                break;
         }
+}
+
+static void
+re_switch_mac_mcu_ram_code_page(struct re_softc *sc, u_int16_t page)
+{
+        u_int16_t tmpUshort;
+
+        page &= (BIT_1 | BIT_0);
+        tmpUshort = MP_ReadMcuAccessRegWord(sc, 0xE446);
+        tmpUshort &= ~(BIT_1 | BIT_0);
+        tmpUshort |= page;
+        MP_WriteMcuAccessRegWord(sc, 0xE446, tmpUshort);
+}
+
+static void
+_re_write_mac_mcu_ram_code(struct re_softc *sc, const u_int16_t *entry, u_int16_t entry_cnt)
+{
+        u_int16_t i;
+
+        for (i = 0; i < entry_cnt; i++) {
+                MP_WriteMcuAccessRegWord(sc, 0xF800 + i * 2, entry[i]);
+        }
+}
+
+static void
+_re_write_mac_mcu_ram_code_with_page(struct re_softc *sc, const u_int16_t *entry, u_int16_t entry_cnt, u_int16_t page_size)
+{
+        u_int16_t i;
+        u_int16_t offset;
+
+        if (page_size == 0) return;
+
+        for (i = 0; i < entry_cnt; i++) {
+                offset = i % page_size;
+                if (offset == 0) {
+                        u_int16_t page = (i / page_size);
+                        re_switch_mac_mcu_ram_code_page(sc, page);
+                }
+                MP_WriteMcuAccessRegWord(sc, 0xF800 + offset * 2, entry[i]);
+        }
+}
+
+static void
+re_write_mac_mcu_ram_code(struct re_softc *sc, const u_int16_t *entry, u_int16_t entry_cnt)
+{
+        if (FALSE == HW_SUPPORT_MAC_MCU(sc)) return;
+        if (entry == NULL || entry_cnt == 0) return;
+
+        if (sc->MacMcuPageSize > 0)
+                _re_write_mac_mcu_ram_code_with_page(sc, entry, entry_cnt, sc->MacMcuPageSize);
+        else
+                _re_write_mac_mcu_ram_code(sc, entry, entry_cnt);
 }
 
 static void re_set_mac_mcu_8168g_1(struct re_softc *sc)
 {
+        static const uint16_t mcu_patch_code_8168g_1[] = {
+                0xE008, 0xE01B, 0xE022, 0xE094, 0xE097, 0xE09A, 0xE0B3, 0xE0BA, 0x49D2,
+                0xF10D, 0x766C, 0x49E2, 0xF00A, 0x1EC0, 0x8EE1, 0xC60A, 0x77C0, 0x4870,
+                0x9FC0, 0x1EA0, 0xC707, 0x8EE1, 0x9D6C, 0xC603, 0xBE00, 0xB416, 0x0076,
+                0xE86C, 0xC406, 0x7580, 0x4852, 0x8D80, 0xC403, 0xBC00, 0xD3E0, 0x02C8,
+                0x8918, 0xE815, 0x1100, 0xF011, 0xE812, 0x4990, 0xF002, 0xE817, 0xE80E,
+                0x4992, 0xF002, 0xE80E, 0xE80A, 0x4993, 0xF002, 0xE818, 0xE806, 0x4991,
+                0xF002, 0xE838, 0xC25E, 0xBA00, 0xC056, 0x7100, 0xFF80, 0x7100, 0x4892,
+                0x4813, 0x8900, 0xE00A, 0x7100, 0x4890, 0x4813, 0x8900, 0xC74B, 0x74F8,
+                0x48C2, 0x4841, 0x8CF8, 0xC746, 0x74FC, 0x49C0, 0xF120, 0x49C1, 0xF11E,
+                0x74F8, 0x49C0, 0xF01B, 0x49C6, 0xF119, 0x74F8, 0x49C4, 0xF013, 0xC536,
+                0x74B0, 0x49C1, 0xF1FD, 0xC537, 0xC434, 0x9CA0, 0xC435, 0x1C13, 0x484F,
+                0x9CA2, 0xC52B, 0x74B0, 0x49C1, 0xF1FD, 0x74F8, 0x48C4, 0x8CF8, 0x7100,
+                0x4893, 0x8900, 0xFF80, 0xC520, 0x74B0, 0x49C1, 0xF11C, 0xC71E, 0x74FC,
+                0x49C1, 0xF118, 0x49C0, 0xF116, 0x74F8, 0x49C0, 0xF013, 0x48C3, 0x8CF8,
+                0xC516, 0x74A2, 0x49CE, 0xF1FE, 0xC411, 0x9CA0, 0xC411, 0x1C13, 0x484F,
+                0x9CA2, 0x74A2, 0x49CF, 0xF1FE, 0x7100, 0x4891, 0x8900, 0xFF80, 0xE400,
+                0xD3E0, 0xE000, 0x0481, 0x0C81, 0xDE20, 0x0000, 0x0992, 0x1B76, 0xC602,
+                0xBE00, 0x059C, 0x1B76, 0xC602, 0xBE00, 0x065A, 0xB400, 0x18DE, 0x2008,
+                0x4001, 0xF10F, 0x7342, 0x1880, 0x2008, 0x0009, 0x4018, 0xF109, 0x7340,
+                0x25BC, 0x130F, 0xF105, 0xC00A, 0x7300, 0x4831, 0x9B00, 0xB000, 0x7340,
+                0x8320, 0xC302, 0xBB00, 0x0C12, 0xE860, 0xC406, 0x7580, 0x4851, 0x8D80,
+                0xC403, 0xBC00, 0xD3E0, 0x02C8, 0xC406, 0x7580, 0x4850, 0x8D80, 0xC403,
+                0xBC00, 0xD3E0, 0x0298
+        };
+
         MP_WriteMcuAccessRegWord(sc, 0xE43C, 0x0000);
         MP_WriteMcuAccessRegWord(sc, 0xE43E, 0x0000);
 
@@ -1091,207 +1226,7 @@ static void re_set_mac_mcu_8168g_1(struct re_softc *sc)
 
         DisableMcuBPs(sc);
 
-        MP_WriteMcuAccessRegWord(sc, 0xF800, 0xE008);
-        MP_WriteMcuAccessRegWord(sc, 0xF802, 0xE01B);
-        MP_WriteMcuAccessRegWord(sc, 0xF804, 0xE022);
-        MP_WriteMcuAccessRegWord(sc, 0xF806, 0xE094);
-        MP_WriteMcuAccessRegWord(sc, 0xF808, 0xE097);
-        MP_WriteMcuAccessRegWord(sc, 0xF80A, 0xE09A);
-        MP_WriteMcuAccessRegWord(sc, 0xF80C, 0xE0B3);
-        MP_WriteMcuAccessRegWord(sc, 0xF80E, 0xE0BA);
-        MP_WriteMcuAccessRegWord(sc, 0xF810, 0x49D2);
-        MP_WriteMcuAccessRegWord(sc, 0xF812, 0xF10D);
-        MP_WriteMcuAccessRegWord(sc, 0xF814, 0x766C);
-        MP_WriteMcuAccessRegWord(sc, 0xF816, 0x49E2);
-        MP_WriteMcuAccessRegWord(sc, 0xF818, 0xF00A);
-        MP_WriteMcuAccessRegWord(sc, 0xF81A, 0x1EC0);
-        MP_WriteMcuAccessRegWord(sc, 0xF81C, 0x8EE1);
-        MP_WriteMcuAccessRegWord(sc, 0xF81E, 0xC60A);
-        MP_WriteMcuAccessRegWord(sc, 0xF820, 0x77C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF822, 0x4870);
-        MP_WriteMcuAccessRegWord(sc, 0xF824, 0x9FC0);
-        MP_WriteMcuAccessRegWord(sc, 0xF826, 0x1EA0);
-        MP_WriteMcuAccessRegWord(sc, 0xF828, 0xC707);
-        MP_WriteMcuAccessRegWord(sc, 0xF82A, 0x8EE1);
-        MP_WriteMcuAccessRegWord(sc, 0xF82C, 0x9D6C);
-        MP_WriteMcuAccessRegWord(sc, 0xF82E, 0xC603);
-        MP_WriteMcuAccessRegWord(sc, 0xF830, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF832, 0xB416);
-        MP_WriteMcuAccessRegWord(sc, 0xF834, 0x0076);
-        MP_WriteMcuAccessRegWord(sc, 0xF836, 0xE86C);
-        MP_WriteMcuAccessRegWord(sc, 0xF838, 0xC406);
-        MP_WriteMcuAccessRegWord(sc, 0xF83A, 0x7580);
-        MP_WriteMcuAccessRegWord(sc, 0xF83C, 0x4852);
-        MP_WriteMcuAccessRegWord(sc, 0xF83E, 0x8D80);
-        MP_WriteMcuAccessRegWord(sc, 0xF840, 0xC403);
-        MP_WriteMcuAccessRegWord(sc, 0xF842, 0xBC00);
-        MP_WriteMcuAccessRegWord(sc, 0xF844, 0xD3E0);
-        MP_WriteMcuAccessRegWord(sc, 0xF846, 0x02C8);
-        MP_WriteMcuAccessRegWord(sc, 0xF848, 0x8918);
-        MP_WriteMcuAccessRegWord(sc, 0xF84A, 0xE815);
-        MP_WriteMcuAccessRegWord(sc, 0xF84C, 0x1100);
-        MP_WriteMcuAccessRegWord(sc, 0xF84E, 0xF011);
-        MP_WriteMcuAccessRegWord(sc, 0xF850, 0xE812);
-        MP_WriteMcuAccessRegWord(sc, 0xF852, 0x4990);
-        MP_WriteMcuAccessRegWord(sc, 0xF854, 0xF002);
-        MP_WriteMcuAccessRegWord(sc, 0xF856, 0xE817);
-        MP_WriteMcuAccessRegWord(sc, 0xF858, 0xE80E);
-        MP_WriteMcuAccessRegWord(sc, 0xF85A, 0x4992);
-        MP_WriteMcuAccessRegWord(sc, 0xF85C, 0xF002);
-        MP_WriteMcuAccessRegWord(sc, 0xF85E, 0xE80E);
-        MP_WriteMcuAccessRegWord(sc, 0xF860, 0xE80A);
-        MP_WriteMcuAccessRegWord(sc, 0xF862, 0x4993);
-        MP_WriteMcuAccessRegWord(sc, 0xF864, 0xF002);
-        MP_WriteMcuAccessRegWord(sc, 0xF866, 0xE818);
-        MP_WriteMcuAccessRegWord(sc, 0xF868, 0xE806);
-        MP_WriteMcuAccessRegWord(sc, 0xF86A, 0x4991);
-        MP_WriteMcuAccessRegWord(sc, 0xF86C, 0xF002);
-        MP_WriteMcuAccessRegWord(sc, 0xF86E, 0xE838);
-        MP_WriteMcuAccessRegWord(sc, 0xF870, 0xC25E);
-        MP_WriteMcuAccessRegWord(sc, 0xF872, 0xBA00);
-        MP_WriteMcuAccessRegWord(sc, 0xF874, 0xC056);
-        MP_WriteMcuAccessRegWord(sc, 0xF876, 0x7100);
-        MP_WriteMcuAccessRegWord(sc, 0xF878, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xF87A, 0x7100);
-        MP_WriteMcuAccessRegWord(sc, 0xF87C, 0x4892);
-        MP_WriteMcuAccessRegWord(sc, 0xF87E, 0x4813);
-        MP_WriteMcuAccessRegWord(sc, 0xF880, 0x8900);
-        MP_WriteMcuAccessRegWord(sc, 0xF882, 0xE00A);
-        MP_WriteMcuAccessRegWord(sc, 0xF884, 0x7100);
-        MP_WriteMcuAccessRegWord(sc, 0xF886, 0x4890);
-        MP_WriteMcuAccessRegWord(sc, 0xF888, 0x4813);
-        MP_WriteMcuAccessRegWord(sc, 0xF88A, 0x8900);
-        MP_WriteMcuAccessRegWord(sc, 0xF88C, 0xC74B);
-        MP_WriteMcuAccessRegWord(sc, 0xF88E, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF890, 0x48C2);
-        MP_WriteMcuAccessRegWord(sc, 0xF892, 0x4841);
-        MP_WriteMcuAccessRegWord(sc, 0xF894, 0x8CF8);
-        MP_WriteMcuAccessRegWord(sc, 0xF896, 0xC746);
-        MP_WriteMcuAccessRegWord(sc, 0xF898, 0x74FC);
-        MP_WriteMcuAccessRegWord(sc, 0xF89A, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF89C, 0xF120);
-        MP_WriteMcuAccessRegWord(sc, 0xF89E, 0x49C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A0, 0xF11E);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A2, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A4, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A6, 0xF01B);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A8, 0x49C6);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AA, 0xF119);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AC, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AE, 0x49C4);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B0, 0xF013);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B2, 0xC536);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B4, 0x74B0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B6, 0x49C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B8, 0xF1FD);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BA, 0xC537);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BC, 0xC434);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BE, 0x9CA0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C0, 0xC435);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C2, 0x1C13);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C4, 0x484F);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C6, 0x9CA2);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C8, 0xC52B);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CA, 0x74B0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CC, 0x49C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CE, 0xF1FD);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D0, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D2, 0x48C4);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D4, 0x8CF8);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D6, 0x7100);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D8, 0x4893);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DA, 0x8900);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DC, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DE, 0xC520);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E0, 0x74B0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E2, 0x49C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E4, 0xF11C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E6, 0xC71E);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E8, 0x74FC);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EA, 0x49C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EC, 0xF118);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EE, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F0, 0xF116);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F2, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F4, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F6, 0xF013);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F8, 0x48C3);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FA, 0x8CF8);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FC, 0xC516);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FE, 0x74A2);
-        MP_WriteMcuAccessRegWord(sc, 0xF900, 0x49CE);
-        MP_WriteMcuAccessRegWord(sc, 0xF902, 0xF1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xF904, 0xC411);
-        MP_WriteMcuAccessRegWord(sc, 0xF906, 0x9CA0);
-        MP_WriteMcuAccessRegWord(sc, 0xF908, 0xC411);
-        MP_WriteMcuAccessRegWord(sc, 0xF90A, 0x1C13);
-        MP_WriteMcuAccessRegWord(sc, 0xF90C, 0x484F);
-        MP_WriteMcuAccessRegWord(sc, 0xF90E, 0x9CA2);
-        MP_WriteMcuAccessRegWord(sc, 0xF910, 0x74A2);
-        MP_WriteMcuAccessRegWord(sc, 0xF912, 0x49CF);
-        MP_WriteMcuAccessRegWord(sc, 0xF914, 0xF1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xF916, 0x7100);
-        MP_WriteMcuAccessRegWord(sc, 0xF918, 0x4891);
-        MP_WriteMcuAccessRegWord(sc, 0xF91A, 0x8900);
-        MP_WriteMcuAccessRegWord(sc, 0xF91C, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xF91E, 0xE400);
-        MP_WriteMcuAccessRegWord(sc, 0xF920, 0xD3E0);
-        MP_WriteMcuAccessRegWord(sc, 0xF922, 0xE000);
-        MP_WriteMcuAccessRegWord(sc, 0xF924, 0x0481);
-        MP_WriteMcuAccessRegWord(sc, 0xF926, 0x0C81);
-        MP_WriteMcuAccessRegWord(sc, 0xF928, 0xDE20);
-        MP_WriteMcuAccessRegWord(sc, 0xF92A, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF92C, 0x0992);
-        MP_WriteMcuAccessRegWord(sc, 0xF92E, 0x1B76);
-        MP_WriteMcuAccessRegWord(sc, 0xF930, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF932, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF934, 0x059C);
-        MP_WriteMcuAccessRegWord(sc, 0xF936, 0x1B76);
-        MP_WriteMcuAccessRegWord(sc, 0xF938, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF93A, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF93C, 0x065A);
-        MP_WriteMcuAccessRegWord(sc, 0xF93E, 0xB400);
-        MP_WriteMcuAccessRegWord(sc, 0xF940, 0x18DE);
-        MP_WriteMcuAccessRegWord(sc, 0xF942, 0x2008);
-        MP_WriteMcuAccessRegWord(sc, 0xF944, 0x4001);
-        MP_WriteMcuAccessRegWord(sc, 0xF946, 0xF10F);
-        MP_WriteMcuAccessRegWord(sc, 0xF948, 0x7342);
-        MP_WriteMcuAccessRegWord(sc, 0xF94A, 0x1880);
-        MP_WriteMcuAccessRegWord(sc, 0xF94C, 0x2008);
-        MP_WriteMcuAccessRegWord(sc, 0xF94E, 0x0009);
-        MP_WriteMcuAccessRegWord(sc, 0xF950, 0x4018);
-        MP_WriteMcuAccessRegWord(sc, 0xF952, 0xF109);
-        MP_WriteMcuAccessRegWord(sc, 0xF954, 0x7340);
-        MP_WriteMcuAccessRegWord(sc, 0xF956, 0x25BC);
-        MP_WriteMcuAccessRegWord(sc, 0xF958, 0x130F);
-        MP_WriteMcuAccessRegWord(sc, 0xF95A, 0xF105);
-        MP_WriteMcuAccessRegWord(sc, 0xF95C, 0xC00A);
-        MP_WriteMcuAccessRegWord(sc, 0xF95E, 0x7300);
-        MP_WriteMcuAccessRegWord(sc, 0xF960, 0x4831);
-        MP_WriteMcuAccessRegWord(sc, 0xF962, 0x9B00);
-        MP_WriteMcuAccessRegWord(sc, 0xF964, 0xB000);
-        MP_WriteMcuAccessRegWord(sc, 0xF966, 0x7340);
-        MP_WriteMcuAccessRegWord(sc, 0xF968, 0x8320);
-        MP_WriteMcuAccessRegWord(sc, 0xF96A, 0xC302);
-        MP_WriteMcuAccessRegWord(sc, 0xF96C, 0xBB00);
-        MP_WriteMcuAccessRegWord(sc, 0xF96E, 0x0C12);
-        MP_WriteMcuAccessRegWord(sc, 0xF970, 0xE860);
-        MP_WriteMcuAccessRegWord(sc, 0xF972, 0xC406);
-        MP_WriteMcuAccessRegWord(sc, 0xF974, 0x7580);
-        MP_WriteMcuAccessRegWord(sc, 0xF976, 0x4851);
-        MP_WriteMcuAccessRegWord(sc, 0xF978, 0x8D80);
-        MP_WriteMcuAccessRegWord(sc, 0xF97A, 0xC403);
-        MP_WriteMcuAccessRegWord(sc, 0xF97C, 0xBC00);
-        MP_WriteMcuAccessRegWord(sc, 0xF97E, 0xD3E0);
-        MP_WriteMcuAccessRegWord(sc, 0xF980, 0x02C8);
-        MP_WriteMcuAccessRegWord(sc, 0xF982, 0xC406);
-        MP_WriteMcuAccessRegWord(sc, 0xF984, 0x7580);
-        MP_WriteMcuAccessRegWord(sc, 0xF986, 0x4850);
-        MP_WriteMcuAccessRegWord(sc, 0xF988, 0x8D80);
-        MP_WriteMcuAccessRegWord(sc, 0xF98A, 0xC403);
-        MP_WriteMcuAccessRegWord(sc, 0xF98C, 0xBC00);
-        MP_WriteMcuAccessRegWord(sc, 0xF98E, 0xD3E0);
-        MP_WriteMcuAccessRegWord(sc, 0xF990, 0x0298);
+        re_write_mac_mcu_ram_code(sc, mcu_patch_code_8168g_1, ARRAY_SIZE(mcu_patch_code_8168g_1));
 
         MP_WriteMcuAccessRegWord(sc, 0xDE30, 0x0080);
 
@@ -1303,125 +1238,31 @@ static void re_set_mac_mcu_8168g_1(struct re_softc *sc)
         MP_WriteMcuAccessRegWord(sc, 0xFC2E, 0x059B);
         MP_WriteMcuAccessRegWord(sc, 0xFC30, 0x0659);
         MP_WriteMcuAccessRegWord(sc, 0xFC32, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xFC34, 0x02BB);
+        MP_WriteMcuAccessRegWord(sc, 0xFC34, 0x02C7);
         MP_WriteMcuAccessRegWord(sc, 0xFC36, 0x0279);
 }
 
 static void re_set_mac_mcu_8168gu_1(struct re_softc *sc)
 {
+        static const uint16_t mcu_patch_code_8168gu_1[] = {
+                0xE008, 0xE011, 0xE015, 0xE018, 0xE01B, 0xE027, 0xE043, 0xE065, 0x49E2,
+                0xF005, 0x49EA, 0xF003, 0xC404, 0xBC00, 0xC403, 0xBC00, 0x0496, 0x051A,
+                0x1D01, 0x8DE8, 0xC602, 0xBE00, 0x0206, 0x1B76, 0xC202, 0xBA00, 0x058A,
+                0x1B76, 0xC602, 0xBE00, 0x0648, 0x74E6, 0x1B78, 0x46DC, 0x1300, 0xF005,
+                0x74F8, 0x48C3, 0x48C4, 0x8CF8, 0x64E7, 0xC302, 0xBB00, 0x068E, 0x74E4,
+                0x49C5, 0xF106, 0x49C6, 0xF107, 0x48C8, 0x48C9, 0xE011, 0x48C9, 0x4848,
+                0xE00E, 0x4848, 0x49C7, 0xF00A, 0x48C9, 0xC60D, 0x1D1F, 0x8DC2, 0x1D00,
+                0x8DC3, 0x1D11, 0x8DC0, 0xE002, 0x4849, 0x94E5, 0xC602, 0xBE00, 0x0238,
+                0xE434, 0x49D9, 0xF01B, 0xC31E, 0x7464, 0x49C4, 0xF114, 0xC31B, 0x6460,
+                0x14FA, 0xFA02, 0xE00F, 0xC317, 0x7460, 0x49C0, 0xF10B, 0xC311, 0x7462,
+                0x48C1, 0x9C62, 0x4841, 0x9C62, 0xC30A, 0x1C04, 0x8C60, 0xE004, 0x1C15,
+                0xC305, 0x8C60, 0xC602, 0xBE00, 0x0374, 0xE434, 0xE030, 0xE61C, 0xE906,
+                0xC602, 0xBE00, 0x0000
+        };
+
         DisableMcuBPs(sc);
 
-        MP_WriteMcuAccessRegWord(sc, 0xF800, 0xE008);
-        MP_WriteMcuAccessRegWord(sc, 0xF802, 0xE011);
-        MP_WriteMcuAccessRegWord(sc, 0xF804, 0xE015);
-        MP_WriteMcuAccessRegWord(sc, 0xF806, 0xE018);
-        MP_WriteMcuAccessRegWord(sc, 0xF808, 0xE01B);
-        MP_WriteMcuAccessRegWord(sc, 0xF80A, 0xE027);
-        MP_WriteMcuAccessRegWord(sc, 0xF80C, 0xE043);
-        MP_WriteMcuAccessRegWord(sc, 0xF80E, 0xE065);
-        MP_WriteMcuAccessRegWord(sc, 0xF810, 0x49E2);
-        MP_WriteMcuAccessRegWord(sc, 0xF812, 0xF005);
-        MP_WriteMcuAccessRegWord(sc, 0xF814, 0x49EA);
-        MP_WriteMcuAccessRegWord(sc, 0xF816, 0xF003);
-        MP_WriteMcuAccessRegWord(sc, 0xF818, 0xC404);
-        MP_WriteMcuAccessRegWord(sc, 0xF81A, 0xBC00);
-        MP_WriteMcuAccessRegWord(sc, 0xF81C, 0xC403);
-        MP_WriteMcuAccessRegWord(sc, 0xF81E, 0xBC00);
-        MP_WriteMcuAccessRegWord(sc, 0xF820, 0x0496);
-        MP_WriteMcuAccessRegWord(sc, 0xF822, 0x051A);
-        MP_WriteMcuAccessRegWord(sc, 0xF824, 0x1D01);
-        MP_WriteMcuAccessRegWord(sc, 0xF826, 0x8DE8);
-        MP_WriteMcuAccessRegWord(sc, 0xF828, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF82A, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF82C, 0x0206);
-        MP_WriteMcuAccessRegWord(sc, 0xF82E, 0x1B76);
-        MP_WriteMcuAccessRegWord(sc, 0xF830, 0xC202);
-        MP_WriteMcuAccessRegWord(sc, 0xF832, 0xBA00);
-        MP_WriteMcuAccessRegWord(sc, 0xF834, 0x058A);
-        MP_WriteMcuAccessRegWord(sc, 0xF836, 0x1B76);
-        MP_WriteMcuAccessRegWord(sc, 0xF838, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF83A, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF83C, 0x0648);
-        MP_WriteMcuAccessRegWord(sc, 0xF83E, 0x74E6);
-        MP_WriteMcuAccessRegWord(sc, 0xF840, 0x1B78);
-        MP_WriteMcuAccessRegWord(sc, 0xF842, 0x46DC);
-        MP_WriteMcuAccessRegWord(sc, 0xF844, 0x1300);
-        MP_WriteMcuAccessRegWord(sc, 0xF846, 0xF005);
-        MP_WriteMcuAccessRegWord(sc, 0xF848, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF84A, 0x48C3);
-        MP_WriteMcuAccessRegWord(sc, 0xF84C, 0x48C4);
-        MP_WriteMcuAccessRegWord(sc, 0xF84E, 0x8CF8);
-        MP_WriteMcuAccessRegWord(sc, 0xF850, 0x64E7);
-        MP_WriteMcuAccessRegWord(sc, 0xF852, 0xC302);
-        MP_WriteMcuAccessRegWord(sc, 0xF854, 0xBB00);
-        MP_WriteMcuAccessRegWord(sc, 0xF856, 0x068E);
-        MP_WriteMcuAccessRegWord(sc, 0xF858, 0x74E4);
-        MP_WriteMcuAccessRegWord(sc, 0xF85A, 0x49C5);
-        MP_WriteMcuAccessRegWord(sc, 0xF85C, 0xF106);
-        MP_WriteMcuAccessRegWord(sc, 0xF85E, 0x49C6);
-        MP_WriteMcuAccessRegWord(sc, 0xF860, 0xF107);
-        MP_WriteMcuAccessRegWord(sc, 0xF862, 0x48C8);
-        MP_WriteMcuAccessRegWord(sc, 0xF864, 0x48C9);
-        MP_WriteMcuAccessRegWord(sc, 0xF866, 0xE011);
-        MP_WriteMcuAccessRegWord(sc, 0xF868, 0x48C9);
-        MP_WriteMcuAccessRegWord(sc, 0xF86A, 0x4848);
-        MP_WriteMcuAccessRegWord(sc, 0xF86C, 0xE00E);
-        MP_WriteMcuAccessRegWord(sc, 0xF86E, 0x4848);
-        MP_WriteMcuAccessRegWord(sc, 0xF870, 0x49C7);
-        MP_WriteMcuAccessRegWord(sc, 0xF872, 0xF00A);
-        MP_WriteMcuAccessRegWord(sc, 0xF874, 0x48C9);
-        MP_WriteMcuAccessRegWord(sc, 0xF876, 0xC60D);
-        MP_WriteMcuAccessRegWord(sc, 0xF878, 0x1D1F);
-        MP_WriteMcuAccessRegWord(sc, 0xF87A, 0x8DC2);
-        MP_WriteMcuAccessRegWord(sc, 0xF87C, 0x1D00);
-        MP_WriteMcuAccessRegWord(sc, 0xF87E, 0x8DC3);
-        MP_WriteMcuAccessRegWord(sc, 0xF880, 0x1D11);
-        MP_WriteMcuAccessRegWord(sc, 0xF882, 0x8DC0);
-        MP_WriteMcuAccessRegWord(sc, 0xF884, 0xE002);
-        MP_WriteMcuAccessRegWord(sc, 0xF886, 0x4849);
-        MP_WriteMcuAccessRegWord(sc, 0xF888, 0x94E5);
-        MP_WriteMcuAccessRegWord(sc, 0xF88A, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF88C, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF88E, 0x0238);
-        MP_WriteMcuAccessRegWord(sc, 0xF890, 0xE434);
-        MP_WriteMcuAccessRegWord(sc, 0xF892, 0x49D9);
-        MP_WriteMcuAccessRegWord(sc, 0xF894, 0xF01B);
-        MP_WriteMcuAccessRegWord(sc, 0xF896, 0xC31E);
-        MP_WriteMcuAccessRegWord(sc, 0xF898, 0x7464);
-        MP_WriteMcuAccessRegWord(sc, 0xF89A, 0x49C4);
-        MP_WriteMcuAccessRegWord(sc, 0xF89C, 0xF114);
-        MP_WriteMcuAccessRegWord(sc, 0xF89E, 0xC31B);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A0, 0x6460);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A2, 0x14FA);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A4, 0xFA02);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A6, 0xE00F);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A8, 0xC317);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AA, 0x7460);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AC, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AE, 0xF10B);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B0, 0xC311);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B2, 0x7462);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B4, 0x48C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B6, 0x9C62);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B8, 0x4841);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BA, 0x9C62);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BC, 0xC30A);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BE, 0x1C04);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C0, 0x8C60);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C2, 0xE004);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C4, 0x1C15);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C6, 0xC305);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C8, 0x8C60);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CA, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CC, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CE, 0x0374);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D0, 0xE434);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D2, 0xE030);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D4, 0xE61C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D6, 0xE906);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D8, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DA, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DC, 0x0000);
+        re_write_mac_mcu_ram_code(sc, mcu_patch_code_8168gu_1, ARRAY_SIZE(mcu_patch_code_8168gu_1));
 
         MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
 
@@ -1436,416 +1277,58 @@ static void re_set_mac_mcu_8168gu_1(struct re_softc *sc)
 
 static void re_set_mac_mcu_8168gu_2(struct re_softc *sc)
 {
+        static const uint16_t mcu_patch_code_8168gu_2[] = {
+                0xE008, 0xE00A, 0xE00D, 0xE02F, 0xE031, 0xE038, 0xE03A, 0xE051, 0xC202,
+                0xBA00, 0x0DFC, 0x7444, 0xC502, 0xBD00, 0x0A30, 0x49D9, 0xF019, 0xC520,
+                0x64A5, 0x1400, 0xF007, 0x0C01, 0x8CA5, 0x1C15, 0xC515, 0x9CA0, 0xE00F,
+                0xC513, 0x74A0, 0x48C8, 0x48CA, 0x9CA0, 0xC510, 0x1B00, 0x9BA0, 0x1B1C,
+                0x483F, 0x9BA2, 0x1B04, 0xC506, 0x9BA0, 0xC603, 0xBE00, 0x0298, 0x03DE,
+                0xE434, 0xE096, 0xE860, 0xDE20, 0xD3C0, 0xC602, 0xBE00, 0x0A64, 0xC707,
+                0x1D00, 0x8DE2, 0x48C1, 0xC502, 0xBD00, 0x00AA, 0xE0C0, 0xC502, 0xBD00,
+                0x0132, 0xC50C, 0x74A2, 0x49CE, 0xF1FE, 0x1C00, 0x9EA0, 0x1C1C, 0x484F,
+                0x9CA2, 0xC402, 0xBC00, 0x0AFA, 0xDE20, 0xE000, 0xE092, 0xE430, 0xDE20,
+                0xE0C0, 0xE860, 0xE84C, 0xB400, 0xB430, 0xE410, 0xC0AE, 0xB407, 0xB406,
+                0xB405, 0xB404, 0xB403, 0xB402, 0xB401, 0xC7EE, 0x76F4, 0xC2ED, 0xC3ED,
+                0xC1EF, 0xC5F3, 0x74A0, 0x49CD, 0xF001, 0xC5EE, 0x74A0, 0x49C1, 0xF105,
+                0xC5E4, 0x74A2, 0x49CE, 0xF00B, 0x7444, 0x484B, 0x9C44, 0x1C10, 0x9C62,
+                0x1C11, 0x8C60, 0x1C00, 0x9CF6, 0xE0EC, 0x49E7, 0xF016, 0x1D80, 0x8DF4,
+                0x74F8, 0x4843, 0x8CF8, 0x74F8, 0x74F8, 0x7444, 0x48C8, 0x48C9, 0x48CA,
+                0x9C44, 0x74F8, 0x4844, 0x8CF8, 0x1E01, 0xE8DB, 0x7420, 0x48C1, 0x9C20,
+                0xE0D5, 0x49E6, 0xF02A, 0x1D40, 0x8DF4, 0x74FC, 0x49C0, 0xF124, 0x49C1,
+                0xF122, 0x74F8, 0x49C0, 0xF01F, 0xE8D3, 0x48C4, 0x8CF8, 0x1E00, 0xE8C6,
+                0xC5B1, 0x74A0, 0x49C3, 0xF016, 0xC5AF, 0x74A4, 0x49C2, 0xF005, 0xC5AA,
+                0x74B2, 0x49C9, 0xF10E, 0xC5A6, 0x74A8, 0x4845, 0x4846, 0x4847, 0x4848,
+                0x9CA8, 0x74B2, 0x4849, 0x9CB2, 0x74A0, 0x484F, 0x9CA0, 0xE0AA, 0x49E4,
+                0xF018, 0x1D10, 0x8DF4, 0x74F8, 0x74F8, 0x74F8, 0x4843, 0x8CF8, 0x74F8,
+                0x74F8, 0x74F8, 0x4844, 0x4842, 0x4841, 0x8CF8, 0x1E01, 0xE89A, 0x7420,
+                0x4841, 0x9C20, 0x7444, 0x4848, 0x9C44, 0xE091, 0x49E5, 0xF03E, 0x1D20,
+                0x8DF4, 0x74F8, 0x48C2, 0x4841, 0x8CF8, 0x1E01, 0x7444, 0x49CA, 0xF103,
+                0x49C2, 0xF00C, 0x49C1, 0xF004, 0x6447, 0x2244, 0xE002, 0x1C01, 0x9C62,
+                0x1C11, 0x8C60, 0x1C00, 0x9CF6, 0x7444, 0x49C8, 0xF01D, 0x74FC, 0x49C0,
+                0xF11A, 0x49C1, 0xF118, 0x74F8, 0x49C0, 0xF015, 0x49C6, 0xF113, 0xE875,
+                0x48C4, 0x8CF8, 0x7420, 0x48C1, 0x9C20, 0xC50A, 0x74A2, 0x8CA5, 0x74A0,
+                0xC505, 0x9CA2, 0x1C11, 0x9CA0, 0xE00A, 0xE434, 0xD3C0, 0xDC00, 0x7444,
+                0x49CA, 0xF004, 0x48CA, 0x9C44, 0xE855, 0xE052, 0x49E8, 0xF024, 0x1D01,
+                0x8DF5, 0x7440, 0x49C0, 0xF11E, 0x7444, 0x49C8, 0xF01B, 0x49CA, 0xF119,
+                0xC5EC, 0x76A4, 0x49E3, 0xF015, 0x49C0, 0xF103, 0x49C1, 0xF011, 0x4849,
+                0x9C44, 0x1C00, 0x9CF6, 0x7444, 0x49C1, 0xF004, 0x6446, 0x1E07, 0xE003,
+                0x1C01, 0x1E03, 0x9C62, 0x1C11, 0x8C60, 0xE830, 0xE02D, 0x49E9, 0xF004,
+                0x1D02, 0x8DF5, 0xE79C, 0x49E3, 0xF006, 0x1D08, 0x8DF4, 0x74F8, 0x74F8,
+                0xE73A, 0x49E1, 0xF007, 0x1D02, 0x8DF4, 0x1E01, 0xE7A7, 0xDE20, 0xE410,
+                0x49E0, 0xF017, 0x1D01, 0x8DF4, 0xC5FA, 0x1C00, 0x8CA0, 0x1C1B, 0x9CA2,
+                0x74A2, 0x49CF, 0xF0FE, 0xC5F3, 0x74A0, 0x4849, 0x9CA0, 0x74F8, 0x49C0,
+                0xF006, 0x48C3, 0x8CF8, 0xE820, 0x74F8, 0x74F8, 0xC432, 0xBC00, 0xC5E4,
+                0x74A2, 0x49CE, 0xF1FE, 0x9EA0, 0x1C1C, 0x484F, 0x9CA2, 0xFF80, 0xB404,
+                0xB405, 0xC5D9, 0x74A2, 0x49CE, 0xF1FE, 0xC41F, 0x9CA0, 0xC41C, 0x1C13,
+                0x484F, 0x9CA2, 0x74A2, 0x49CF, 0xF1FE, 0xB005, 0xB004, 0xFF80, 0xB404,
+                0xB405, 0xC5C7, 0x74A2, 0x49CE, 0xF1FE, 0xC40E, 0x9CA0, 0xC40A, 0x1C13,
+                0x484F, 0x9CA2, 0x74A2, 0x49CF, 0xF1FE, 0xB005, 0xB004, 0xFF80, 0x0000,
+                0x0481, 0x0C81, 0x0AE0
+        };
+
         DisableMcuBPs(sc);
 
-        MP_WriteMcuAccessRegWord(sc, 0xF800, 0xE008);
-        MP_WriteMcuAccessRegWord(sc, 0xF802, 0xE00A);
-        MP_WriteMcuAccessRegWord(sc, 0xF804, 0xE00D);
-        MP_WriteMcuAccessRegWord(sc, 0xF806, 0xE02F);
-        MP_WriteMcuAccessRegWord(sc, 0xF808, 0xE031);
-        MP_WriteMcuAccessRegWord(sc, 0xF80A, 0xE038);
-        MP_WriteMcuAccessRegWord(sc, 0xF80C, 0xE03A);
-        MP_WriteMcuAccessRegWord(sc, 0xF80E, 0xE051);
-        MP_WriteMcuAccessRegWord(sc, 0xF810, 0xC202);
-        MP_WriteMcuAccessRegWord(sc, 0xF812, 0xBA00);
-        MP_WriteMcuAccessRegWord(sc, 0xF814, 0x0DFC);
-        MP_WriteMcuAccessRegWord(sc, 0xF816, 0x7444);
-        MP_WriteMcuAccessRegWord(sc, 0xF818, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xF81A, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF81C, 0x0A30);
-        MP_WriteMcuAccessRegWord(sc, 0xF81E, 0x49D9);
-        MP_WriteMcuAccessRegWord(sc, 0xF820, 0xF019);
-        MP_WriteMcuAccessRegWord(sc, 0xF822, 0xC520);
-        MP_WriteMcuAccessRegWord(sc, 0xF824, 0x64A5);
-        MP_WriteMcuAccessRegWord(sc, 0xF826, 0x1400);
-        MP_WriteMcuAccessRegWord(sc, 0xF828, 0xF007);
-        MP_WriteMcuAccessRegWord(sc, 0xF82A, 0x0C01);
-        MP_WriteMcuAccessRegWord(sc, 0xF82C, 0x8CA5);
-        MP_WriteMcuAccessRegWord(sc, 0xF82E, 0x1C15);
-        MP_WriteMcuAccessRegWord(sc, 0xF830, 0xC515);
-        MP_WriteMcuAccessRegWord(sc, 0xF832, 0x9CA0);
-        MP_WriteMcuAccessRegWord(sc, 0xF834, 0xE00F);
-        MP_WriteMcuAccessRegWord(sc, 0xF836, 0xC513);
-        MP_WriteMcuAccessRegWord(sc, 0xF838, 0x74A0);
-        MP_WriteMcuAccessRegWord(sc, 0xF83A, 0x48C8);
-        MP_WriteMcuAccessRegWord(sc, 0xF83C, 0x48CA);
-        MP_WriteMcuAccessRegWord(sc, 0xF83E, 0x9CA0);
-        MP_WriteMcuAccessRegWord(sc, 0xF840, 0xC510);
-        MP_WriteMcuAccessRegWord(sc, 0xF842, 0x1B00);
-        MP_WriteMcuAccessRegWord(sc, 0xF844, 0x9BA0);
-        MP_WriteMcuAccessRegWord(sc, 0xF846, 0x1B1C);
-        MP_WriteMcuAccessRegWord(sc, 0xF848, 0x483F);
-        MP_WriteMcuAccessRegWord(sc, 0xF84A, 0x9BA2);
-        MP_WriteMcuAccessRegWord(sc, 0xF84C, 0x1B04);
-        MP_WriteMcuAccessRegWord(sc, 0xF84E, 0xC506);
-        MP_WriteMcuAccessRegWord(sc, 0xF850, 0x9BA0);
-        MP_WriteMcuAccessRegWord(sc, 0xF852, 0xC603);
-        MP_WriteMcuAccessRegWord(sc, 0xF854, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF856, 0x0298);
-        MP_WriteMcuAccessRegWord(sc, 0xF858, 0x03DE);
-        MP_WriteMcuAccessRegWord(sc, 0xF85A, 0xE434);
-        MP_WriteMcuAccessRegWord(sc, 0xF85C, 0xE096);
-        MP_WriteMcuAccessRegWord(sc, 0xF85E, 0xE860);
-        MP_WriteMcuAccessRegWord(sc, 0xF860, 0xDE20);
-        MP_WriteMcuAccessRegWord(sc, 0xF862, 0xD3C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF864, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF866, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF868, 0x0A64);
-        MP_WriteMcuAccessRegWord(sc, 0xF86A, 0xC707);
-        MP_WriteMcuAccessRegWord(sc, 0xF86C, 0x1D00);
-        MP_WriteMcuAccessRegWord(sc, 0xF86E, 0x8DE2);
-        MP_WriteMcuAccessRegWord(sc, 0xF870, 0x48C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF872, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xF874, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF876, 0x00AA);
-        MP_WriteMcuAccessRegWord(sc, 0xF878, 0xE0C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF87A, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xF87C, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF87E, 0x0132);
-        MP_WriteMcuAccessRegWord(sc, 0xF880, 0xC50C);
-        MP_WriteMcuAccessRegWord(sc, 0xF882, 0x74A2);
-        MP_WriteMcuAccessRegWord(sc, 0xF884, 0x49CE);
-        MP_WriteMcuAccessRegWord(sc, 0xF886, 0xF1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xF888, 0x1C00);
-        MP_WriteMcuAccessRegWord(sc, 0xF88A, 0x9EA0);
-        MP_WriteMcuAccessRegWord(sc, 0xF88C, 0x1C1C);
-        MP_WriteMcuAccessRegWord(sc, 0xF88E, 0x484F);
-        MP_WriteMcuAccessRegWord(sc, 0xF890, 0x9CA2);
-        MP_WriteMcuAccessRegWord(sc, 0xF892, 0xC402);
-        MP_WriteMcuAccessRegWord(sc, 0xF894, 0xBC00);
-        MP_WriteMcuAccessRegWord(sc, 0xF896, 0x0AFA);
-        MP_WriteMcuAccessRegWord(sc, 0xF898, 0xDE20);
-        MP_WriteMcuAccessRegWord(sc, 0xF89A, 0xE000);
-        MP_WriteMcuAccessRegWord(sc, 0xF89C, 0xE092);
-        MP_WriteMcuAccessRegWord(sc, 0xF89E, 0xE430);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A0, 0xDE20);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A2, 0xE0C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A4, 0xE860);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A6, 0xE84C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A8, 0xB400);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AA, 0xB430);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AC, 0xE410);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AE, 0xC0AE);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B0, 0xB407);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B2, 0xB406);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B4, 0xB405);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B6, 0xB404);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B8, 0xB403);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BA, 0xB402);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BC, 0xB401);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BE, 0xC7EE);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C0, 0x76F4);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C2, 0xC2ED);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C4, 0xC3ED);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C6, 0xC1EF);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C8, 0xC5F3);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CA, 0x74A0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CC, 0x49CD);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CE, 0xF001);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D0, 0xC5EE);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D2, 0x74A0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D4, 0x49C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D6, 0xF105);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D8, 0xC5E4);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DA, 0x74A2);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DC, 0x49CE);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DE, 0xF00B);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E0, 0x7444);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E2, 0x484B);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E4, 0x9C44);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E6, 0x1C10);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E8, 0x9C62);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EA, 0x1C11);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EC, 0x8C60);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EE, 0x1C00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F0, 0x9CF6);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F2, 0xE0EC);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F4, 0x49E7);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F6, 0xF016);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F8, 0x1D80);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FA, 0x8DF4);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FC, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FE, 0x4843);
-        MP_WriteMcuAccessRegWord(sc, 0xF900, 0x8CF8);
-        MP_WriteMcuAccessRegWord(sc, 0xF902, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF904, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF906, 0x7444);
-        MP_WriteMcuAccessRegWord(sc, 0xF908, 0x48C8);
-        MP_WriteMcuAccessRegWord(sc, 0xF90A, 0x48C9);
-        MP_WriteMcuAccessRegWord(sc, 0xF90C, 0x48CA);
-        MP_WriteMcuAccessRegWord(sc, 0xF90E, 0x9C44);
-        MP_WriteMcuAccessRegWord(sc, 0xF910, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF912, 0x4844);
-        MP_WriteMcuAccessRegWord(sc, 0xF914, 0x8CF8);
-        MP_WriteMcuAccessRegWord(sc, 0xF916, 0x1E01);
-        MP_WriteMcuAccessRegWord(sc, 0xF918, 0xE8DB);
-        MP_WriteMcuAccessRegWord(sc, 0xF91A, 0x7420);
-        MP_WriteMcuAccessRegWord(sc, 0xF91C, 0x48C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF91E, 0x9C20);
-        MP_WriteMcuAccessRegWord(sc, 0xF920, 0xE0D5);
-        MP_WriteMcuAccessRegWord(sc, 0xF922, 0x49E6);
-        MP_WriteMcuAccessRegWord(sc, 0xF924, 0xF02A);
-        MP_WriteMcuAccessRegWord(sc, 0xF926, 0x1D40);
-        MP_WriteMcuAccessRegWord(sc, 0xF928, 0x8DF4);
-        MP_WriteMcuAccessRegWord(sc, 0xF92A, 0x74FC);
-        MP_WriteMcuAccessRegWord(sc, 0xF92C, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF92E, 0xF124);
-        MP_WriteMcuAccessRegWord(sc, 0xF930, 0x49C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF932, 0xF122);
-        MP_WriteMcuAccessRegWord(sc, 0xF934, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF936, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF938, 0xF01F);
-        MP_WriteMcuAccessRegWord(sc, 0xF93A, 0xE8D3);
-        MP_WriteMcuAccessRegWord(sc, 0xF93C, 0x48C4);
-        MP_WriteMcuAccessRegWord(sc, 0xF93E, 0x8CF8);
-        MP_WriteMcuAccessRegWord(sc, 0xF940, 0x1E00);
-        MP_WriteMcuAccessRegWord(sc, 0xF942, 0xE8C6);
-        MP_WriteMcuAccessRegWord(sc, 0xF944, 0xC5B1);
-        MP_WriteMcuAccessRegWord(sc, 0xF946, 0x74A0);
-        MP_WriteMcuAccessRegWord(sc, 0xF948, 0x49C3);
-        MP_WriteMcuAccessRegWord(sc, 0xF94A, 0xF016);
-        MP_WriteMcuAccessRegWord(sc, 0xF94C, 0xC5AF);
-        MP_WriteMcuAccessRegWord(sc, 0xF94E, 0x74A4);
-        MP_WriteMcuAccessRegWord(sc, 0xF950, 0x49C2);
-        MP_WriteMcuAccessRegWord(sc, 0xF952, 0xF005);
-        MP_WriteMcuAccessRegWord(sc, 0xF954, 0xC5AA);
-        MP_WriteMcuAccessRegWord(sc, 0xF956, 0x74B2);
-        MP_WriteMcuAccessRegWord(sc, 0xF958, 0x49C9);
-        MP_WriteMcuAccessRegWord(sc, 0xF95A, 0xF10E);
-        MP_WriteMcuAccessRegWord(sc, 0xF95C, 0xC5A6);
-        MP_WriteMcuAccessRegWord(sc, 0xF95E, 0x74A8);
-        MP_WriteMcuAccessRegWord(sc, 0xF960, 0x4845);
-        MP_WriteMcuAccessRegWord(sc, 0xF962, 0x4846);
-        MP_WriteMcuAccessRegWord(sc, 0xF964, 0x4847);
-        MP_WriteMcuAccessRegWord(sc, 0xF966, 0x4848);
-        MP_WriteMcuAccessRegWord(sc, 0xF968, 0x9CA8);
-        MP_WriteMcuAccessRegWord(sc, 0xF96A, 0x74B2);
-        MP_WriteMcuAccessRegWord(sc, 0xF96C, 0x4849);
-        MP_WriteMcuAccessRegWord(sc, 0xF96E, 0x9CB2);
-        MP_WriteMcuAccessRegWord(sc, 0xF970, 0x74A0);
-        MP_WriteMcuAccessRegWord(sc, 0xF972, 0x484F);
-        MP_WriteMcuAccessRegWord(sc, 0xF974, 0x9CA0);
-        MP_WriteMcuAccessRegWord(sc, 0xF976, 0xE0AA);
-        MP_WriteMcuAccessRegWord(sc, 0xF978, 0x49E4);
-        MP_WriteMcuAccessRegWord(sc, 0xF97A, 0xF018);
-        MP_WriteMcuAccessRegWord(sc, 0xF97C, 0x1D10);
-        MP_WriteMcuAccessRegWord(sc, 0xF97E, 0x8DF4);
-        MP_WriteMcuAccessRegWord(sc, 0xF980, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF982, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF984, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF986, 0x4843);
-        MP_WriteMcuAccessRegWord(sc, 0xF988, 0x8CF8);
-        MP_WriteMcuAccessRegWord(sc, 0xF98A, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF98C, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF98E, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF990, 0x4844);
-        MP_WriteMcuAccessRegWord(sc, 0xF992, 0x4842);
-        MP_WriteMcuAccessRegWord(sc, 0xF994, 0x4841);
-        MP_WriteMcuAccessRegWord(sc, 0xF996, 0x8CF8);
-        MP_WriteMcuAccessRegWord(sc, 0xF998, 0x1E01);
-        MP_WriteMcuAccessRegWord(sc, 0xF99A, 0xE89A);
-        MP_WriteMcuAccessRegWord(sc, 0xF99C, 0x7420);
-        MP_WriteMcuAccessRegWord(sc, 0xF99E, 0x4841);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A0, 0x9C20);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A2, 0x7444);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A4, 0x4848);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A6, 0x9C44);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A8, 0xE091);
-        MP_WriteMcuAccessRegWord(sc, 0xF9AA, 0x49E5);
-        MP_WriteMcuAccessRegWord(sc, 0xF9AC, 0xF03E);
-        MP_WriteMcuAccessRegWord(sc, 0xF9AE, 0x1D20);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B0, 0x8DF4);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B2, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B4, 0x48C2);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B6, 0x4841);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B8, 0x8CF8);
-        MP_WriteMcuAccessRegWord(sc, 0xF9BA, 0x1E01);
-        MP_WriteMcuAccessRegWord(sc, 0xF9BC, 0x7444);
-        MP_WriteMcuAccessRegWord(sc, 0xF9BE, 0x49CA);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C0, 0xF103);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C2, 0x49C2);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C4, 0xF00C);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C6, 0x49C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C8, 0xF004);
-        MP_WriteMcuAccessRegWord(sc, 0xF9CA, 0x6447);
-        MP_WriteMcuAccessRegWord(sc, 0xF9CC, 0x2244);
-        MP_WriteMcuAccessRegWord(sc, 0xF9CE, 0xE002);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D0, 0x1C01);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D2, 0x9C62);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D4, 0x1C11);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D6, 0x8C60);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D8, 0x1C00);
-        MP_WriteMcuAccessRegWord(sc, 0xF9DA, 0x9CF6);
-        MP_WriteMcuAccessRegWord(sc, 0xF9DC, 0x7444);
-        MP_WriteMcuAccessRegWord(sc, 0xF9DE, 0x49C8);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E0, 0xF01D);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E2, 0x74FC);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E4, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E6, 0xF11A);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E8, 0x49C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF9EA, 0xF118);
-        MP_WriteMcuAccessRegWord(sc, 0xF9EC, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF9EE, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F0, 0xF015);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F2, 0x49C6);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F4, 0xF113);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F6, 0xE875);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F8, 0x48C4);
-        MP_WriteMcuAccessRegWord(sc, 0xF9FA, 0x8CF8);
-        MP_WriteMcuAccessRegWord(sc, 0xF9FC, 0x7420);
-        MP_WriteMcuAccessRegWord(sc, 0xF9FE, 0x48C1);
-        MP_WriteMcuAccessRegWord(sc, 0xFA00, 0x9C20);
-        MP_WriteMcuAccessRegWord(sc, 0xFA02, 0xC50A);
-        MP_WriteMcuAccessRegWord(sc, 0xFA04, 0x74A2);
-        MP_WriteMcuAccessRegWord(sc, 0xFA06, 0x8CA5);
-        MP_WriteMcuAccessRegWord(sc, 0xFA08, 0x74A0);
-        MP_WriteMcuAccessRegWord(sc, 0xFA0A, 0xC505);
-        MP_WriteMcuAccessRegWord(sc, 0xFA0C, 0x9CA2);
-        MP_WriteMcuAccessRegWord(sc, 0xFA0E, 0x1C11);
-        MP_WriteMcuAccessRegWord(sc, 0xFA10, 0x9CA0);
-        MP_WriteMcuAccessRegWord(sc, 0xFA12, 0xE00A);
-        MP_WriteMcuAccessRegWord(sc, 0xFA14, 0xE434);
-        MP_WriteMcuAccessRegWord(sc, 0xFA16, 0xD3C0);
-        MP_WriteMcuAccessRegWord(sc, 0xFA18, 0xDC00);
-        MP_WriteMcuAccessRegWord(sc, 0xFA1A, 0x7444);
-        MP_WriteMcuAccessRegWord(sc, 0xFA1C, 0x49CA);
-        MP_WriteMcuAccessRegWord(sc, 0xFA1E, 0xF004);
-        MP_WriteMcuAccessRegWord(sc, 0xFA20, 0x48CA);
-        MP_WriteMcuAccessRegWord(sc, 0xFA22, 0x9C44);
-        MP_WriteMcuAccessRegWord(sc, 0xFA24, 0xE855);
-        MP_WriteMcuAccessRegWord(sc, 0xFA26, 0xE052);
-        MP_WriteMcuAccessRegWord(sc, 0xFA28, 0x49E8);
-        MP_WriteMcuAccessRegWord(sc, 0xFA2A, 0xF024);
-        MP_WriteMcuAccessRegWord(sc, 0xFA2C, 0x1D01);
-        MP_WriteMcuAccessRegWord(sc, 0xFA2E, 0x8DF5);
-        MP_WriteMcuAccessRegWord(sc, 0xFA30, 0x7440);
-        MP_WriteMcuAccessRegWord(sc, 0xFA32, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xFA34, 0xF11E);
-        MP_WriteMcuAccessRegWord(sc, 0xFA36, 0x7444);
-        MP_WriteMcuAccessRegWord(sc, 0xFA38, 0x49C8);
-        MP_WriteMcuAccessRegWord(sc, 0xFA3A, 0xF01B);
-        MP_WriteMcuAccessRegWord(sc, 0xFA3C, 0x49CA);
-        MP_WriteMcuAccessRegWord(sc, 0xFA3E, 0xF119);
-        MP_WriteMcuAccessRegWord(sc, 0xFA40, 0xC5EC);
-        MP_WriteMcuAccessRegWord(sc, 0xFA42, 0x76A4);
-        MP_WriteMcuAccessRegWord(sc, 0xFA44, 0x49E3);
-        MP_WriteMcuAccessRegWord(sc, 0xFA46, 0xF015);
-        MP_WriteMcuAccessRegWord(sc, 0xFA48, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xFA4A, 0xF103);
-        MP_WriteMcuAccessRegWord(sc, 0xFA4C, 0x49C1);
-        MP_WriteMcuAccessRegWord(sc, 0xFA4E, 0xF011);
-        MP_WriteMcuAccessRegWord(sc, 0xFA50, 0x4849);
-        MP_WriteMcuAccessRegWord(sc, 0xFA52, 0x9C44);
-        MP_WriteMcuAccessRegWord(sc, 0xFA54, 0x1C00);
-        MP_WriteMcuAccessRegWord(sc, 0xFA56, 0x9CF6);
-        MP_WriteMcuAccessRegWord(sc, 0xFA58, 0x7444);
-        MP_WriteMcuAccessRegWord(sc, 0xFA5A, 0x49C1);
-        MP_WriteMcuAccessRegWord(sc, 0xFA5C, 0xF004);
-        MP_WriteMcuAccessRegWord(sc, 0xFA5E, 0x6446);
-        MP_WriteMcuAccessRegWord(sc, 0xFA60, 0x1E07);
-        MP_WriteMcuAccessRegWord(sc, 0xFA62, 0xE003);
-        MP_WriteMcuAccessRegWord(sc, 0xFA64, 0x1C01);
-        MP_WriteMcuAccessRegWord(sc, 0xFA66, 0x1E03);
-        MP_WriteMcuAccessRegWord(sc, 0xFA68, 0x9C62);
-        MP_WriteMcuAccessRegWord(sc, 0xFA6A, 0x1C11);
-        MP_WriteMcuAccessRegWord(sc, 0xFA6C, 0x8C60);
-        MP_WriteMcuAccessRegWord(sc, 0xFA6E, 0xE830);
-        MP_WriteMcuAccessRegWord(sc, 0xFA70, 0xE02D);
-        MP_WriteMcuAccessRegWord(sc, 0xFA72, 0x49E9);
-        MP_WriteMcuAccessRegWord(sc, 0xFA74, 0xF004);
-        MP_WriteMcuAccessRegWord(sc, 0xFA76, 0x1D02);
-        MP_WriteMcuAccessRegWord(sc, 0xFA78, 0x8DF5);
-        MP_WriteMcuAccessRegWord(sc, 0xFA7A, 0xE79C);
-        MP_WriteMcuAccessRegWord(sc, 0xFA7C, 0x49E3);
-        MP_WriteMcuAccessRegWord(sc, 0xFA7E, 0xF006);
-        MP_WriteMcuAccessRegWord(sc, 0xFA80, 0x1D08);
-        MP_WriteMcuAccessRegWord(sc, 0xFA82, 0x8DF4);
-        MP_WriteMcuAccessRegWord(sc, 0xFA84, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xFA86, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xFA88, 0xE73A);
-        MP_WriteMcuAccessRegWord(sc, 0xFA8A, 0x49E1);
-        MP_WriteMcuAccessRegWord(sc, 0xFA8C, 0xF007);
-        MP_WriteMcuAccessRegWord(sc, 0xFA8E, 0x1D02);
-        MP_WriteMcuAccessRegWord(sc, 0xFA90, 0x8DF4);
-        MP_WriteMcuAccessRegWord(sc, 0xFA92, 0x1E01);
-        MP_WriteMcuAccessRegWord(sc, 0xFA94, 0xE7A7);
-        MP_WriteMcuAccessRegWord(sc, 0xFA96, 0xDE20);
-        MP_WriteMcuAccessRegWord(sc, 0xFA98, 0xE410);
-        MP_WriteMcuAccessRegWord(sc, 0xFA9A, 0x49E0);
-        MP_WriteMcuAccessRegWord(sc, 0xFA9C, 0xF017);
-        MP_WriteMcuAccessRegWord(sc, 0xFA9E, 0x1D01);
-        MP_WriteMcuAccessRegWord(sc, 0xFAA0, 0x8DF4);
-        MP_WriteMcuAccessRegWord(sc, 0xFAA2, 0xC5FA);
-        MP_WriteMcuAccessRegWord(sc, 0xFAA4, 0x1C00);
-        MP_WriteMcuAccessRegWord(sc, 0xFAA6, 0x8CA0);
-        MP_WriteMcuAccessRegWord(sc, 0xFAA8, 0x1C1B);
-        MP_WriteMcuAccessRegWord(sc, 0xFAAA, 0x9CA2);
-        MP_WriteMcuAccessRegWord(sc, 0xFAAC, 0x74A2);
-        MP_WriteMcuAccessRegWord(sc, 0xFAAE, 0x49CF);
-        MP_WriteMcuAccessRegWord(sc, 0xFAB0, 0xF0FE);
-        MP_WriteMcuAccessRegWord(sc, 0xFAB2, 0xC5F3);
-        MP_WriteMcuAccessRegWord(sc, 0xFAB4, 0x74A0);
-        MP_WriteMcuAccessRegWord(sc, 0xFAB6, 0x4849);
-        MP_WriteMcuAccessRegWord(sc, 0xFAB8, 0x9CA0);
-        MP_WriteMcuAccessRegWord(sc, 0xFABA, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xFABC, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xFABE, 0xF006);
-        MP_WriteMcuAccessRegWord(sc, 0xFAC0, 0x48C3);
-        MP_WriteMcuAccessRegWord(sc, 0xFAC2, 0x8CF8);
-        MP_WriteMcuAccessRegWord(sc, 0xFAC4, 0xE820);
-        MP_WriteMcuAccessRegWord(sc, 0xFAC6, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xFAC8, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xFACA, 0xC432);
-        MP_WriteMcuAccessRegWord(sc, 0xFACC, 0xBC00);
-        MP_WriteMcuAccessRegWord(sc, 0xFACE, 0xC5E4);
-        MP_WriteMcuAccessRegWord(sc, 0xFAD0, 0x74A2);
-        MP_WriteMcuAccessRegWord(sc, 0xFAD2, 0x49CE);
-        MP_WriteMcuAccessRegWord(sc, 0xFAD4, 0xF1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xFAD6, 0x9EA0);
-        MP_WriteMcuAccessRegWord(sc, 0xFAD8, 0x1C1C);
-        MP_WriteMcuAccessRegWord(sc, 0xFADA, 0x484F);
-        MP_WriteMcuAccessRegWord(sc, 0xFADC, 0x9CA2);
-        MP_WriteMcuAccessRegWord(sc, 0xFADE, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xFAE0, 0xB404);
-        MP_WriteMcuAccessRegWord(sc, 0xFAE2, 0xB405);
-        MP_WriteMcuAccessRegWord(sc, 0xFAE4, 0xC5D9);
-        MP_WriteMcuAccessRegWord(sc, 0xFAE6, 0x74A2);
-        MP_WriteMcuAccessRegWord(sc, 0xFAE8, 0x49CE);
-        MP_WriteMcuAccessRegWord(sc, 0xFAEA, 0xF1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xFAEC, 0xC41F);
-        MP_WriteMcuAccessRegWord(sc, 0xFAEE, 0x9CA0);
-        MP_WriteMcuAccessRegWord(sc, 0xFAF0, 0xC41C);
-        MP_WriteMcuAccessRegWord(sc, 0xFAF2, 0x1C13);
-        MP_WriteMcuAccessRegWord(sc, 0xFAF4, 0x484F);
-        MP_WriteMcuAccessRegWord(sc, 0xFAF6, 0x9CA2);
-        MP_WriteMcuAccessRegWord(sc, 0xFAF8, 0x74A2);
-        MP_WriteMcuAccessRegWord(sc, 0xFAFA, 0x49CF);
-        MP_WriteMcuAccessRegWord(sc, 0xFAFC, 0xF1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xFAFE, 0xB005);
-        MP_WriteMcuAccessRegWord(sc, 0xFB00, 0xB004);
-        MP_WriteMcuAccessRegWord(sc, 0xFB02, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xFB04, 0xB404);
-        MP_WriteMcuAccessRegWord(sc, 0xFB06, 0xB405);
-        MP_WriteMcuAccessRegWord(sc, 0xFB08, 0xC5C7);
-        MP_WriteMcuAccessRegWord(sc, 0xFB0A, 0x74A2);
-        MP_WriteMcuAccessRegWord(sc, 0xFB0C, 0x49CE);
-        MP_WriteMcuAccessRegWord(sc, 0xFB0E, 0xF1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xFB10, 0xC40E);
-        MP_WriteMcuAccessRegWord(sc, 0xFB12, 0x9CA0);
-        MP_WriteMcuAccessRegWord(sc, 0xFB14, 0xC40A);
-        MP_WriteMcuAccessRegWord(sc, 0xFB16, 0x1C13);
-        MP_WriteMcuAccessRegWord(sc, 0xFB18, 0x484F);
-        MP_WriteMcuAccessRegWord(sc, 0xFB1A, 0x9CA2);
-        MP_WriteMcuAccessRegWord(sc, 0xFB1C, 0x74A2);
-        MP_WriteMcuAccessRegWord(sc, 0xFB1E, 0x49CF);
-        MP_WriteMcuAccessRegWord(sc, 0xFB20, 0xF1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xFB22, 0xB005);
-        MP_WriteMcuAccessRegWord(sc, 0xFB24, 0xB004);
-        MP_WriteMcuAccessRegWord(sc, 0xFB26, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xFB28, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xFB2A, 0x0481);
-        MP_WriteMcuAccessRegWord(sc, 0xFB2C, 0x0C81);
-        MP_WriteMcuAccessRegWord(sc, 0xFB2E, 0x0AE0);
+        re_write_mac_mcu_ram_code(sc, mcu_patch_code_8168gu_2, ARRAY_SIZE(mcu_patch_code_8168gu_2));
 
         MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
 
@@ -1859,121 +1342,108 @@ static void re_set_mac_mcu_8168gu_2(struct re_softc *sc)
         MP_WriteMcuAccessRegWord(sc, 0xFC36, 0x08DF);
 }
 
-static void re_set_mac_mcu_8411b_1(struct re_softc *sc)
+static void re_set_mac_mcu_8168ep_1(struct re_softc *sc)
 {
+        static const uint16_t mcu_patch_code_8168ep_1[] = {
+                0xE008, 0xE0D3, 0xE0D6, 0xE0D9, 0xE0DB, 0xE0DD, 0xE0DF, 0xE0E1, 0xC251,
+                0x7340, 0x49B1, 0xF010, 0x1D02, 0x8D40, 0xC202, 0xBA00, 0x2C3A, 0xC0F0,
+                0xE8DE, 0x2000, 0x8000, 0xC0B6, 0x268C, 0x752C, 0x49D4, 0xF112, 0xE025,
+                0xC2F6, 0x7146, 0xC2F5, 0x7340, 0x49BE, 0xF103, 0xC7F2, 0xE002, 0xC7F1,
+                0x304F, 0x6226, 0x49A1, 0xF1F0, 0x7222, 0x49A0, 0xF1ED, 0x2525, 0x1F28,
+                0x3097, 0x3091, 0x9A36, 0x752C, 0x21DC, 0x25BC, 0xC6E2, 0x77C0, 0x1304,
+                0xF014, 0x1303, 0xF014, 0x1302, 0xF014, 0x1301, 0xF014, 0x49D4, 0xF103,
+                0xC3D7, 0xBB00, 0xC618, 0x67C6, 0x752E, 0x22D7, 0x26DD, 0x1505, 0xF013,
+                0xC60A, 0xBE00, 0xC309, 0xBB00, 0xC308, 0xBB00, 0xC307, 0xBB00, 0xC306,
+                0xBB00, 0x25C8, 0x25A6, 0x25AC, 0x25B2, 0x25B8, 0xCD08, 0x0000, 0xC0BC,
+                0xC2FF, 0x7340, 0x49B0, 0xF04E, 0x1F46, 0x308F, 0xC3F7, 0x1C04, 0xE84D,
+                0x1401, 0xF147, 0x7226, 0x49A7, 0xF044, 0x7222, 0x2525, 0x1F30, 0x3097,
+                0x3091, 0x7340, 0xC4EA, 0x401C, 0xF006, 0xC6E8, 0x75C0, 0x49D7, 0xF105,
+                0xE036, 0x1D08, 0x8DC1, 0x0208, 0x6640, 0x2764, 0x1606, 0xF12F, 0x6346,
+                0x133B, 0xF12C, 0x9B34, 0x1B18, 0x3093, 0xC32A, 0x1C10, 0xE82A, 0x1401,
+                0xF124, 0x1A36, 0x308A, 0x7322, 0x25B5, 0x0B0E, 0x1C00, 0xE82C, 0xC71F,
+                0x4027, 0xF11A, 0xE838, 0x1F42, 0x308F, 0x1B08, 0xE824, 0x7236, 0x7746,
+                0x1700, 0xF00D, 0xC313, 0x401F, 0xF103, 0x1F00, 0x9F46, 0x7744, 0x449F,
+                0x445F, 0xE817, 0xC70A, 0x4027, 0xF105, 0xC302, 0xBB00, 0x2E08, 0x2DC2,
+                0xC7FF, 0xBF00, 0xCDB8, 0xFFFF, 0x0C02, 0xA554, 0xA5DC, 0x402F, 0xF105,
+                0x1400, 0xF1FA, 0x1C01, 0xE002, 0x1C00, 0xFF80, 0x49B0, 0xF004, 0x0B01,
+                0xA1D3, 0xE003, 0x0B02, 0xA5D3, 0x3127, 0x3720, 0x0B02, 0xA5D3, 0x3127,
+                0x3720, 0x1300, 0xF1FB, 0xFF80, 0x7322, 0x25B5, 0x1E28, 0x30DE, 0x30D9,
+                0x7264, 0x1E11, 0x2368, 0x3116, 0xFF80, 0x1B7E, 0xC602, 0xBE00, 0x06A6,
+                0x1B7E, 0xC602, 0xBE00, 0x0764, 0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00,
+                0x0000, 0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00,
+                0x0000
+        };
+
         DisableMcuBPs(sc);
 
-        MP_WriteMcuAccessRegWord(sc, 0xF800, 0xE008);
-        MP_WriteMcuAccessRegWord(sc, 0xF802, 0xE00A);
-        MP_WriteMcuAccessRegWord(sc, 0xF804, 0xE00C);
-        MP_WriteMcuAccessRegWord(sc, 0xF806, 0xE00E);
-        MP_WriteMcuAccessRegWord(sc, 0xF808, 0xE027);
-        MP_WriteMcuAccessRegWord(sc, 0xF80A, 0xE04F);
-        MP_WriteMcuAccessRegWord(sc, 0xF80C, 0xE05E);
-        MP_WriteMcuAccessRegWord(sc, 0xF80E, 0xE065);
-        MP_WriteMcuAccessRegWord(sc, 0xF810, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF812, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF814, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF816, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xF818, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF81A, 0x074C);
-        MP_WriteMcuAccessRegWord(sc, 0xF81C, 0xC302);
-        MP_WriteMcuAccessRegWord(sc, 0xF81E, 0xBB00);
-        MP_WriteMcuAccessRegWord(sc, 0xF820, 0x080A);
-        MP_WriteMcuAccessRegWord(sc, 0xF822, 0x6420);
-        MP_WriteMcuAccessRegWord(sc, 0xF824, 0x48C2);
-        MP_WriteMcuAccessRegWord(sc, 0xF826, 0x8C20);
-        MP_WriteMcuAccessRegWord(sc, 0xF828, 0xC516);
-        MP_WriteMcuAccessRegWord(sc, 0xF82A, 0x64A4);
-        MP_WriteMcuAccessRegWord(sc, 0xF82C, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF82E, 0xF009);
-        MP_WriteMcuAccessRegWord(sc, 0xF830, 0x74A2);
-        MP_WriteMcuAccessRegWord(sc, 0xF832, 0x8CA5);
-        MP_WriteMcuAccessRegWord(sc, 0xF834, 0x74A0);
-        MP_WriteMcuAccessRegWord(sc, 0xF836, 0xC50E);
-        MP_WriteMcuAccessRegWord(sc, 0xF838, 0x9CA2);
-        MP_WriteMcuAccessRegWord(sc, 0xF83A, 0x1C11);
-        MP_WriteMcuAccessRegWord(sc, 0xF83C, 0x9CA0);
-        MP_WriteMcuAccessRegWord(sc, 0xF83E, 0xE006);
-        MP_WriteMcuAccessRegWord(sc, 0xF840, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF842, 0x48C4);
-        MP_WriteMcuAccessRegWord(sc, 0xF844, 0x8CF8);
-        MP_WriteMcuAccessRegWord(sc, 0xF846, 0xC404);
-        MP_WriteMcuAccessRegWord(sc, 0xF848, 0xBC00);
-        MP_WriteMcuAccessRegWord(sc, 0xF84A, 0xC403);
-        MP_WriteMcuAccessRegWord(sc, 0xF84C, 0xBC00);
-        MP_WriteMcuAccessRegWord(sc, 0xF84E, 0x0BF2);
-        MP_WriteMcuAccessRegWord(sc, 0xF850, 0x0C0A);
-        MP_WriteMcuAccessRegWord(sc, 0xF852, 0xE434);
-        MP_WriteMcuAccessRegWord(sc, 0xF854, 0xD3C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF856, 0x49D9);
-        MP_WriteMcuAccessRegWord(sc, 0xF858, 0xF01F);
-        MP_WriteMcuAccessRegWord(sc, 0xF85A, 0xC526);
-        MP_WriteMcuAccessRegWord(sc, 0xF85C, 0x64A5);
-        MP_WriteMcuAccessRegWord(sc, 0xF85E, 0x1400);
-        MP_WriteMcuAccessRegWord(sc, 0xF860, 0xF007);
-        MP_WriteMcuAccessRegWord(sc, 0xF862, 0x0C01);
-        MP_WriteMcuAccessRegWord(sc, 0xF864, 0x8CA5);
-        MP_WriteMcuAccessRegWord(sc, 0xF866, 0x1C15);
-        MP_WriteMcuAccessRegWord(sc, 0xF868, 0xC51B);
-        MP_WriteMcuAccessRegWord(sc, 0xF86A, 0x9CA0);
-        MP_WriteMcuAccessRegWord(sc, 0xF86C, 0xE013);
-        MP_WriteMcuAccessRegWord(sc, 0xF86E, 0xC519);
-        MP_WriteMcuAccessRegWord(sc, 0xF870, 0x74A0);
-        MP_WriteMcuAccessRegWord(sc, 0xF872, 0x48C4);
-        MP_WriteMcuAccessRegWord(sc, 0xF874, 0x8CA0);
-        MP_WriteMcuAccessRegWord(sc, 0xF876, 0xC516);
-        MP_WriteMcuAccessRegWord(sc, 0xF878, 0x74A4);
-        MP_WriteMcuAccessRegWord(sc, 0xF87A, 0x48C8);
-        MP_WriteMcuAccessRegWord(sc, 0xF87C, 0x48CA);
-        MP_WriteMcuAccessRegWord(sc, 0xF87E, 0x9CA4);
-        MP_WriteMcuAccessRegWord(sc, 0xF880, 0xC512);
-        MP_WriteMcuAccessRegWord(sc, 0xF882, 0x1B00);
-        MP_WriteMcuAccessRegWord(sc, 0xF884, 0x9BA0);
-        MP_WriteMcuAccessRegWord(sc, 0xF886, 0x1B1C);
-        MP_WriteMcuAccessRegWord(sc, 0xF888, 0x483F);
-        MP_WriteMcuAccessRegWord(sc, 0xF88A, 0x9BA2);
-        MP_WriteMcuAccessRegWord(sc, 0xF88C, 0x1B04);
-        MP_WriteMcuAccessRegWord(sc, 0xF88E, 0xC508);
-        MP_WriteMcuAccessRegWord(sc, 0xF890, 0x9BA0);
-        MP_WriteMcuAccessRegWord(sc, 0xF892, 0xC505);
-        MP_WriteMcuAccessRegWord(sc, 0xF894, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF896, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xF898, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF89A, 0x0300);
-        MP_WriteMcuAccessRegWord(sc, 0xF89C, 0x051E);
-        MP_WriteMcuAccessRegWord(sc, 0xF89E, 0xE434);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A0, 0xE018);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A2, 0xE092);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A4, 0xDE20);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A6, 0xD3C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A8, 0xC50F);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AA, 0x76A4);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AC, 0x49E3);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AE, 0xF007);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B0, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B2, 0xF103);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B4, 0xC607);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B6, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B8, 0xC606);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BA, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BC, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BE, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C0, 0x0C4C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C2, 0x0C28);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C4, 0x0C2C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C6, 0xDC00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C8, 0xC707);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CA, 0x1D00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CC, 0x8DE2);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CE, 0x48C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D0, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D2, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D4, 0x00AA);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D6, 0xE0C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D8, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DA, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DC, 0x0132);
+        re_write_mac_mcu_ram_code(sc, mcu_patch_code_8168ep_1, ARRAY_SIZE(mcu_patch_code_8168ep_1));
+
+        MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
+
+        MP_WriteMcuAccessRegWord(sc, 0xFC28, 0x2549);
+        MP_WriteMcuAccessRegWord(sc, 0xFC2A, 0x06A5);
+        MP_WriteMcuAccessRegWord(sc, 0xFC2C, 0x0763);
+}
+
+static bool re_check_dash_other_fun_present(struct re_softc *sc)
+{
+        //check if func 2 exist
+        if (MP_ReadOtherFunPciEConfigSpace(sc, 2, 0xf000) != 0xffffffff)
+                return true;
+
+        return false;
+}
+
+static void re_set_mac_mcu_8168ep_2(struct re_softc *sc)
+{
+        static const uint16_t mcu_patch_code_8168ep_2[] = {
+                0xE008, 0xE017, 0xE052, 0xE057, 0xE059, 0xE05B, 0xE05D, 0xE05F, 0xC50F,
+                0x76A4, 0x49E3, 0xF007, 0x49C0, 0xF103, 0xC607, 0xBE00, 0xC606, 0xBE00,
+                0xC602, 0xBE00, 0x0BDA, 0x0BB6, 0x0BBA, 0xDC00, 0xB400, 0xB401, 0xB402,
+                0xB403, 0xB404, 0xC02E, 0x7206, 0x49AE, 0xF1FE, 0xC12B, 0x9904, 0xC12A,
+                0x9906, 0x7206, 0x49AE, 0xF1FE, 0x7200, 0x49A0, 0xF117, 0xC123, 0xC223,
+                0xC323, 0xE808, 0xC322, 0xE806, 0xC321, 0xE804, 0xC320, 0xE802, 0xE00C,
+                0x740E, 0x49CE, 0xF1FE, 0x9908, 0x990A, 0x9A0C, 0x9B0E, 0x740E, 0x49CE,
+                0xF1FE, 0xFF80, 0xB004, 0xB003, 0xB002, 0xB001, 0xB000, 0xC604, 0xC002,
+                0xB800, 0x1FC8, 0xE000, 0xE8E0, 0xF128, 0x0002, 0xFFFF, 0xF000, 0x8001,
+                0x8002, 0x8003, 0x8004, 0x48C1, 0x48C2, 0x9C46, 0xC402, 0xBC00, 0x0490,
+                0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000,
+                0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000
+        };
+
+        DisableMcuBPs(sc);
+
+        re_write_mac_mcu_ram_code(sc, mcu_patch_code_8168ep_2, ARRAY_SIZE(mcu_patch_code_8168ep_2));
+
+        MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
+
+        MP_WriteMcuAccessRegWord(sc, 0xFC28, 0x0BB3);
+        if (false == re_check_dash_other_fun_present(sc))
+                MP_WriteMcuAccessRegWord(sc, 0xFC2A, 0x1FC7);
+        //MP_WriteMcuAccessRegWord(sc, 0xFC2C, 0x0485);
+}
+
+static void re_set_mac_mcu_8411b_1(struct re_softc *sc)
+{
+        static const uint16_t mcu_patch_code_8411b_1[] = {
+                0xE008, 0xE00A, 0xE00C, 0xE00E, 0xE027, 0xE04F, 0xE05E, 0xE065, 0xC602,
+                0xBE00, 0x0000, 0xC502, 0xBD00, 0x074C, 0xC302, 0xBB00, 0x080A, 0x6420,
+                0x48C2, 0x8C20, 0xC516, 0x64A4, 0x49C0, 0xF009, 0x74A2, 0x8CA5, 0x74A0,
+                0xC50E, 0x9CA2, 0x1C11, 0x9CA0, 0xE006, 0x74F8, 0x48C4, 0x8CF8, 0xC404,
+                0xBC00, 0xC403, 0xBC00, 0x0BF2, 0x0C0A, 0xE434, 0xD3C0, 0x49D9, 0xF01F,
+                0xC526, 0x64A5, 0x1400, 0xF007, 0x0C01, 0x8CA5, 0x1C15, 0xC51B, 0x9CA0,
+                0xE013, 0xC519, 0x74A0, 0x48C4, 0x8CA0, 0xC516, 0x74A4, 0x48C8, 0x48CA,
+                0x9CA4, 0xC512, 0x1B00, 0x9BA0, 0x1B1C, 0x483F, 0x9BA2, 0x1B04, 0xC508,
+                0x9BA0, 0xC505, 0xBD00, 0xC502, 0xBD00, 0x0300, 0x051E, 0xE434, 0xE018,
+                0xE092, 0xDE20, 0xD3C0, 0xC50F, 0x76A4, 0x49E3, 0xF007, 0x49C0, 0xF103,
+                0xC607, 0xBE00, 0xC606, 0xBE00, 0xC602, 0xBE00, 0x0C4C, 0x0C28, 0x0C2C,
+                0xDC00, 0xC707, 0x1D00, 0x8DE2, 0x48C1, 0xC502, 0xBD00, 0x00AA, 0xE0C0,
+                0xC502, 0xBD00, 0x0132
+        };
+
+        DisableMcuBPs(sc);
+
+        re_write_mac_mcu_ram_code(sc, mcu_patch_code_8411b_1, ARRAY_SIZE(mcu_patch_code_8411b_1));
 
         MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
 
@@ -1986,441 +1456,34 @@ static void re_set_mac_mcu_8411b_1(struct re_softc *sc)
         MP_WriteMcuAccessRegWord(sc, 0xFC36, 0x012D);
 }
 
-static void re_set_mac_mcu_8168ep_1(struct re_softc *sc)
-{
-        DisableMcuBPs(sc);
-
-        MP_WriteMcuAccessRegWord(sc, 0xF800, 0xE008);
-        MP_WriteMcuAccessRegWord(sc, 0xF802, 0xE0D3);
-        MP_WriteMcuAccessRegWord(sc, 0xF804, 0xE0D6);
-        MP_WriteMcuAccessRegWord(sc, 0xF806, 0xE0D9);
-        MP_WriteMcuAccessRegWord(sc, 0xF808, 0xE0DB);
-        MP_WriteMcuAccessRegWord(sc, 0xF80A, 0xE0DD);
-        MP_WriteMcuAccessRegWord(sc, 0xF80C, 0xE0DF);
-        MP_WriteMcuAccessRegWord(sc, 0xF80E, 0xE0E1);
-        MP_WriteMcuAccessRegWord(sc, 0xF810, 0xC251);
-        MP_WriteMcuAccessRegWord(sc, 0xF812, 0x7340);
-        MP_WriteMcuAccessRegWord(sc, 0xF814, 0x49B1);
-        MP_WriteMcuAccessRegWord(sc, 0xF816, 0xF010);
-        MP_WriteMcuAccessRegWord(sc, 0xF818, 0x1D02);
-        MP_WriteMcuAccessRegWord(sc, 0xF81A, 0x8D40);
-        MP_WriteMcuAccessRegWord(sc, 0xF81C, 0xC202);
-        MP_WriteMcuAccessRegWord(sc, 0xF81E, 0xBA00);
-        MP_WriteMcuAccessRegWord(sc, 0xF820, 0x2C3A);
-        MP_WriteMcuAccessRegWord(sc, 0xF822, 0xC0F0);
-        MP_WriteMcuAccessRegWord(sc, 0xF824, 0xE8DE);
-        MP_WriteMcuAccessRegWord(sc, 0xF826, 0x2000);
-        MP_WriteMcuAccessRegWord(sc, 0xF828, 0x8000);
-        MP_WriteMcuAccessRegWord(sc, 0xF82A, 0xC0B6);
-        MP_WriteMcuAccessRegWord(sc, 0xF82C, 0x268C);
-        MP_WriteMcuAccessRegWord(sc, 0xF82E, 0x752C);
-        MP_WriteMcuAccessRegWord(sc, 0xF830, 0x49D4);
-        MP_WriteMcuAccessRegWord(sc, 0xF832, 0xF112);
-        MP_WriteMcuAccessRegWord(sc, 0xF834, 0xE025);
-        MP_WriteMcuAccessRegWord(sc, 0xF836, 0xC2F6);
-        MP_WriteMcuAccessRegWord(sc, 0xF838, 0x7146);
-        MP_WriteMcuAccessRegWord(sc, 0xF83A, 0xC2F5);
-        MP_WriteMcuAccessRegWord(sc, 0xF83C, 0x7340);
-        MP_WriteMcuAccessRegWord(sc, 0xF83E, 0x49BE);
-        MP_WriteMcuAccessRegWord(sc, 0xF840, 0xF103);
-        MP_WriteMcuAccessRegWord(sc, 0xF842, 0xC7F2);
-        MP_WriteMcuAccessRegWord(sc, 0xF844, 0xE002);
-        MP_WriteMcuAccessRegWord(sc, 0xF846, 0xC7F1);
-        MP_WriteMcuAccessRegWord(sc, 0xF848, 0x304F);
-        MP_WriteMcuAccessRegWord(sc, 0xF84A, 0x6226);
-        MP_WriteMcuAccessRegWord(sc, 0xF84C, 0x49A1);
-        MP_WriteMcuAccessRegWord(sc, 0xF84E, 0xF1F0);
-        MP_WriteMcuAccessRegWord(sc, 0xF850, 0x7222);
-        MP_WriteMcuAccessRegWord(sc, 0xF852, 0x49A0);
-        MP_WriteMcuAccessRegWord(sc, 0xF854, 0xF1ED);
-        MP_WriteMcuAccessRegWord(sc, 0xF856, 0x2525);
-        MP_WriteMcuAccessRegWord(sc, 0xF858, 0x1F28);
-        MP_WriteMcuAccessRegWord(sc, 0xF85A, 0x3097);
-        MP_WriteMcuAccessRegWord(sc, 0xF85C, 0x3091);
-        MP_WriteMcuAccessRegWord(sc, 0xF85E, 0x9A36);
-        MP_WriteMcuAccessRegWord(sc, 0xF860, 0x752C);
-        MP_WriteMcuAccessRegWord(sc, 0xF862, 0x21DC);
-        MP_WriteMcuAccessRegWord(sc, 0xF864, 0x25BC);
-        MP_WriteMcuAccessRegWord(sc, 0xF866, 0xC6E2);
-        MP_WriteMcuAccessRegWord(sc, 0xF868, 0x77C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF86A, 0x1304);
-        MP_WriteMcuAccessRegWord(sc, 0xF86C, 0xF014);
-        MP_WriteMcuAccessRegWord(sc, 0xF86E, 0x1303);
-        MP_WriteMcuAccessRegWord(sc, 0xF870, 0xF014);
-        MP_WriteMcuAccessRegWord(sc, 0xF872, 0x1302);
-        MP_WriteMcuAccessRegWord(sc, 0xF874, 0xF014);
-        MP_WriteMcuAccessRegWord(sc, 0xF876, 0x1301);
-        MP_WriteMcuAccessRegWord(sc, 0xF878, 0xF014);
-        MP_WriteMcuAccessRegWord(sc, 0xF87A, 0x49D4);
-        MP_WriteMcuAccessRegWord(sc, 0xF87C, 0xF103);
-        MP_WriteMcuAccessRegWord(sc, 0xF87E, 0xC3D7);
-        MP_WriteMcuAccessRegWord(sc, 0xF880, 0xBB00);
-        MP_WriteMcuAccessRegWord(sc, 0xF882, 0xC618);
-        MP_WriteMcuAccessRegWord(sc, 0xF884, 0x67C6);
-        MP_WriteMcuAccessRegWord(sc, 0xF886, 0x752E);
-        MP_WriteMcuAccessRegWord(sc, 0xF888, 0x22D7);
-        MP_WriteMcuAccessRegWord(sc, 0xF88A, 0x26DD);
-        MP_WriteMcuAccessRegWord(sc, 0xF88C, 0x1505);
-        MP_WriteMcuAccessRegWord(sc, 0xF88E, 0xF013);
-        MP_WriteMcuAccessRegWord(sc, 0xF890, 0xC60A);
-        MP_WriteMcuAccessRegWord(sc, 0xF892, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF894, 0xC309);
-        MP_WriteMcuAccessRegWord(sc, 0xF896, 0xBB00);
-        MP_WriteMcuAccessRegWord(sc, 0xF898, 0xC308);
-        MP_WriteMcuAccessRegWord(sc, 0xF89A, 0xBB00);
-        MP_WriteMcuAccessRegWord(sc, 0xF89C, 0xC307);
-        MP_WriteMcuAccessRegWord(sc, 0xF89E, 0xBB00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A0, 0xC306);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A2, 0xBB00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A4, 0x25C8);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A6, 0x25A6);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A8, 0x25AC);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AA, 0x25B2);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AC, 0x25B8);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AE, 0xCD08);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B0, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B2, 0xC0BC);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B4, 0xC2FF);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B6, 0x7340);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B8, 0x49B0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BA, 0xF04E);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BC, 0x1F46);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BE, 0x308F);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C0, 0xC3F7);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C2, 0x1C04);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C4, 0xE84D);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C6, 0x1401);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C8, 0xF147);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CA, 0x7226);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CC, 0x49A7);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CE, 0xF044);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D0, 0x7222);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D2, 0x2525);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D4, 0x1F30);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D6, 0x3097);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D8, 0x3091);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DA, 0x7340);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DC, 0xC4EA);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DE, 0x401C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E0, 0xF006);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E2, 0xC6E8);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E4, 0x75C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E6, 0x49D7);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E8, 0xF105);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EA, 0xE036);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EC, 0x1D08);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EE, 0x8DC1);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F0, 0x0208);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F2, 0x6640);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F4, 0x2764);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F6, 0x1606);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F8, 0xF12F);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FA, 0x6346);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FC, 0x133B);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FE, 0xF12C);
-        MP_WriteMcuAccessRegWord(sc, 0xF900, 0x9B34);
-        MP_WriteMcuAccessRegWord(sc, 0xF902, 0x1B18);
-        MP_WriteMcuAccessRegWord(sc, 0xF904, 0x3093);
-        MP_WriteMcuAccessRegWord(sc, 0xF906, 0xC32A);
-        MP_WriteMcuAccessRegWord(sc, 0xF908, 0x1C10);
-        MP_WriteMcuAccessRegWord(sc, 0xF90A, 0xE82A);
-        MP_WriteMcuAccessRegWord(sc, 0xF90C, 0x1401);
-        MP_WriteMcuAccessRegWord(sc, 0xF90E, 0xF124);
-        MP_WriteMcuAccessRegWord(sc, 0xF910, 0x1A36);
-        MP_WriteMcuAccessRegWord(sc, 0xF912, 0x308A);
-        MP_WriteMcuAccessRegWord(sc, 0xF914, 0x7322);
-        MP_WriteMcuAccessRegWord(sc, 0xF916, 0x25B5);
-        MP_WriteMcuAccessRegWord(sc, 0xF918, 0x0B0E);
-        MP_WriteMcuAccessRegWord(sc, 0xF91A, 0x1C00);
-        MP_WriteMcuAccessRegWord(sc, 0xF91C, 0xE82C);
-        MP_WriteMcuAccessRegWord(sc, 0xF91E, 0xC71F);
-        MP_WriteMcuAccessRegWord(sc, 0xF920, 0x4027);
-        MP_WriteMcuAccessRegWord(sc, 0xF922, 0xF11A);
-        MP_WriteMcuAccessRegWord(sc, 0xF924, 0xE838);
-        MP_WriteMcuAccessRegWord(sc, 0xF926, 0x1F42);
-        MP_WriteMcuAccessRegWord(sc, 0xF928, 0x308F);
-        MP_WriteMcuAccessRegWord(sc, 0xF92A, 0x1B08);
-        MP_WriteMcuAccessRegWord(sc, 0xF92C, 0xE824);
-        MP_WriteMcuAccessRegWord(sc, 0xF92E, 0x7236);
-        MP_WriteMcuAccessRegWord(sc, 0xF930, 0x7746);
-        MP_WriteMcuAccessRegWord(sc, 0xF932, 0x1700);
-        MP_WriteMcuAccessRegWord(sc, 0xF934, 0xF00D);
-        MP_WriteMcuAccessRegWord(sc, 0xF936, 0xC313);
-        MP_WriteMcuAccessRegWord(sc, 0xF938, 0x401F);
-        MP_WriteMcuAccessRegWord(sc, 0xF93A, 0xF103);
-        MP_WriteMcuAccessRegWord(sc, 0xF93C, 0x1F00);
-        MP_WriteMcuAccessRegWord(sc, 0xF93E, 0x9F46);
-        MP_WriteMcuAccessRegWord(sc, 0xF940, 0x7744);
-        MP_WriteMcuAccessRegWord(sc, 0xF942, 0x449F);
-        MP_WriteMcuAccessRegWord(sc, 0xF944, 0x445F);
-        MP_WriteMcuAccessRegWord(sc, 0xF946, 0xE817);
-        MP_WriteMcuAccessRegWord(sc, 0xF948, 0xC70A);
-        MP_WriteMcuAccessRegWord(sc, 0xF94A, 0x4027);
-        MP_WriteMcuAccessRegWord(sc, 0xF94C, 0xF105);
-        MP_WriteMcuAccessRegWord(sc, 0xF94E, 0xC302);
-        MP_WriteMcuAccessRegWord(sc, 0xF950, 0xBB00);
-        MP_WriteMcuAccessRegWord(sc, 0xF952, 0x2E08);
-        MP_WriteMcuAccessRegWord(sc, 0xF954, 0x2DC2);
-        MP_WriteMcuAccessRegWord(sc, 0xF956, 0xC7FF);
-        MP_WriteMcuAccessRegWord(sc, 0xF958, 0xBF00);
-        MP_WriteMcuAccessRegWord(sc, 0xF95A, 0xCDB8);
-        MP_WriteMcuAccessRegWord(sc, 0xF95C, 0xFFFF);
-        MP_WriteMcuAccessRegWord(sc, 0xF95E, 0x0C02);
-        MP_WriteMcuAccessRegWord(sc, 0xF960, 0xA554);
-        MP_WriteMcuAccessRegWord(sc, 0xF962, 0xA5DC);
-        MP_WriteMcuAccessRegWord(sc, 0xF964, 0x402F);
-        MP_WriteMcuAccessRegWord(sc, 0xF966, 0xF105);
-        MP_WriteMcuAccessRegWord(sc, 0xF968, 0x1400);
-        MP_WriteMcuAccessRegWord(sc, 0xF96A, 0xF1FA);
-        MP_WriteMcuAccessRegWord(sc, 0xF96C, 0x1C01);
-        MP_WriteMcuAccessRegWord(sc, 0xF96E, 0xE002);
-        MP_WriteMcuAccessRegWord(sc, 0xF970, 0x1C00);
-        MP_WriteMcuAccessRegWord(sc, 0xF972, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xF974, 0x49B0);
-        MP_WriteMcuAccessRegWord(sc, 0xF976, 0xF004);
-        MP_WriteMcuAccessRegWord(sc, 0xF978, 0x0B01);
-        MP_WriteMcuAccessRegWord(sc, 0xF97A, 0xA1D3);
-        MP_WriteMcuAccessRegWord(sc, 0xF97C, 0xE003);
-        MP_WriteMcuAccessRegWord(sc, 0xF97E, 0x0B02);
-        MP_WriteMcuAccessRegWord(sc, 0xF980, 0xA5D3);
-        MP_WriteMcuAccessRegWord(sc, 0xF982, 0x3127);
-        MP_WriteMcuAccessRegWord(sc, 0xF984, 0x3720);
-        MP_WriteMcuAccessRegWord(sc, 0xF986, 0x0B02);
-        MP_WriteMcuAccessRegWord(sc, 0xF988, 0xA5D3);
-        MP_WriteMcuAccessRegWord(sc, 0xF98A, 0x3127);
-        MP_WriteMcuAccessRegWord(sc, 0xF98C, 0x3720);
-        MP_WriteMcuAccessRegWord(sc, 0xF98E, 0x1300);
-        MP_WriteMcuAccessRegWord(sc, 0xF990, 0xF1FB);
-        MP_WriteMcuAccessRegWord(sc, 0xF992, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xF994, 0x7322);
-        MP_WriteMcuAccessRegWord(sc, 0xF996, 0x25B5);
-        MP_WriteMcuAccessRegWord(sc, 0xF998, 0x1E28);
-        MP_WriteMcuAccessRegWord(sc, 0xF99A, 0x30DE);
-        MP_WriteMcuAccessRegWord(sc, 0xF99C, 0x30D9);
-        MP_WriteMcuAccessRegWord(sc, 0xF99E, 0x7264);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A0, 0x1E11);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A2, 0x2368);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A4, 0x3116);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A6, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A8, 0x1B7E);
-        MP_WriteMcuAccessRegWord(sc, 0xF9AA, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF9AC, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF9AE, 0x06A6);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B0, 0x1B7E);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B2, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B4, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B6, 0x0764);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B8, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF9BA, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF9BC, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF9BE, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C0, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C2, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C4, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C6, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C8, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF9CA, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF9CC, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF9CE, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D0, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D2, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D4, 0x0000);
-
-        MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
-
-        MP_WriteMcuAccessRegWord(sc, 0xFC28, 0x2549);
-        MP_WriteMcuAccessRegWord(sc, 0xFC2A, 0x06A5);
-        MP_WriteMcuAccessRegWord(sc, 0xFC2C, 0x0763);
-}
-
-static void re_set_mac_mcu_8168ep_2(struct re_softc *sc)
-{
-        DisableMcuBPs(sc);
-
-        MP_WriteMcuAccessRegWord(sc, 0xF800, 0xE008);
-        MP_WriteMcuAccessRegWord(sc, 0xF802, 0xE017);
-        MP_WriteMcuAccessRegWord(sc, 0xF804, 0xE019);
-        MP_WriteMcuAccessRegWord(sc, 0xF806, 0xE01B);
-        MP_WriteMcuAccessRegWord(sc, 0xF808, 0xE01D);
-        MP_WriteMcuAccessRegWord(sc, 0xF80A, 0xE01F);
-        MP_WriteMcuAccessRegWord(sc, 0xF80C, 0xE021);
-        MP_WriteMcuAccessRegWord(sc, 0xF80E, 0xE023);
-        MP_WriteMcuAccessRegWord(sc, 0xF810, 0xC50F);
-        MP_WriteMcuAccessRegWord(sc, 0xF812, 0x76A4);
-        MP_WriteMcuAccessRegWord(sc, 0xF814, 0x49E3);
-        MP_WriteMcuAccessRegWord(sc, 0xF816, 0xF007);
-        MP_WriteMcuAccessRegWord(sc, 0xF818, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF81A, 0xF103);
-        MP_WriteMcuAccessRegWord(sc, 0xF81C, 0xC607);
-        MP_WriteMcuAccessRegWord(sc, 0xF81E, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF820, 0xC606);
-        MP_WriteMcuAccessRegWord(sc, 0xF822, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF824, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF826, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF828, 0x0BDA);
-        MP_WriteMcuAccessRegWord(sc, 0xF82A, 0x0BB0);
-        MP_WriteMcuAccessRegWord(sc, 0xF82C, 0x0BBA);
-        MP_WriteMcuAccessRegWord(sc, 0xF82E, 0xDC00);
-        MP_WriteMcuAccessRegWord(sc, 0xF830, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF832, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF834, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF836, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF838, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF83A, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF83C, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF83E, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF840, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF842, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF844, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF846, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF848, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF84A, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF84C, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF84E, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF850, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF852, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF854, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF856, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF858, 0x0000);
-
-        MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
-
-        MP_WriteMcuAccessRegWord(sc, 0xFC28, 0x0BB3);
-}
-
 static void re_set_mac_mcu_8168h_1(struct re_softc *sc)
 {
         DisableMcuBPs(sc);
+}
 
-        MP_WriteMcuAccessRegWord(sc, 0xF800, 0xE008);
-        MP_WriteMcuAccessRegWord(sc, 0xF802, 0xE00F);
-        MP_WriteMcuAccessRegWord(sc, 0xF804, 0xE011);
-        MP_WriteMcuAccessRegWord(sc, 0xF806, 0xE047);
-        MP_WriteMcuAccessRegWord(sc, 0xF808, 0xE049);
-        MP_WriteMcuAccessRegWord(sc, 0xF80A, 0xE073);
-        MP_WriteMcuAccessRegWord(sc, 0xF80C, 0xE075);
-        MP_WriteMcuAccessRegWord(sc, 0xF80E, 0xE077);
-        MP_WriteMcuAccessRegWord(sc, 0xF810, 0xC707);
-        MP_WriteMcuAccessRegWord(sc, 0xF812, 0x1D00);
-        MP_WriteMcuAccessRegWord(sc, 0xF814, 0x8DE2);
-        MP_WriteMcuAccessRegWord(sc, 0xF816, 0x48C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF818, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xF81A, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF81C, 0x00E4);
-        MP_WriteMcuAccessRegWord(sc, 0xF81E, 0xE0C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF820, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xF822, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF824, 0x0216);
-        MP_WriteMcuAccessRegWord(sc, 0xF826, 0xC634);
-        MP_WriteMcuAccessRegWord(sc, 0xF828, 0x75C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF82A, 0x49D3);
-        MP_WriteMcuAccessRegWord(sc, 0xF82C, 0xF027);
-        MP_WriteMcuAccessRegWord(sc, 0xF82E, 0xC631);
-        MP_WriteMcuAccessRegWord(sc, 0xF830, 0x75C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF832, 0x49D3);
-        MP_WriteMcuAccessRegWord(sc, 0xF834, 0xF123);
-        MP_WriteMcuAccessRegWord(sc, 0xF836, 0xC627);
-        MP_WriteMcuAccessRegWord(sc, 0xF838, 0x75C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF83A, 0xB405);
-        MP_WriteMcuAccessRegWord(sc, 0xF83C, 0xC525);
-        MP_WriteMcuAccessRegWord(sc, 0xF83E, 0x9DC0);
-        MP_WriteMcuAccessRegWord(sc, 0xF840, 0xC621);
-        MP_WriteMcuAccessRegWord(sc, 0xF842, 0x75C8);
-        MP_WriteMcuAccessRegWord(sc, 0xF844, 0x49D5);
-        MP_WriteMcuAccessRegWord(sc, 0xF846, 0xF00A);
-        MP_WriteMcuAccessRegWord(sc, 0xF848, 0x49D6);
-        MP_WriteMcuAccessRegWord(sc, 0xF84A, 0xF008);
-        MP_WriteMcuAccessRegWord(sc, 0xF84C, 0x49D7);
-        MP_WriteMcuAccessRegWord(sc, 0xF84E, 0xF006);
-        MP_WriteMcuAccessRegWord(sc, 0xF850, 0x49D8);
-        MP_WriteMcuAccessRegWord(sc, 0xF852, 0xF004);
-        MP_WriteMcuAccessRegWord(sc, 0xF854, 0x75D2);
-        MP_WriteMcuAccessRegWord(sc, 0xF856, 0x49D9);
-        MP_WriteMcuAccessRegWord(sc, 0xF858, 0xF111);
-        MP_WriteMcuAccessRegWord(sc, 0xF85A, 0xC517);
-        MP_WriteMcuAccessRegWord(sc, 0xF85C, 0x9DC8);
-        MP_WriteMcuAccessRegWord(sc, 0xF85E, 0xC516);
-        MP_WriteMcuAccessRegWord(sc, 0xF860, 0x9DD2);
-        MP_WriteMcuAccessRegWord(sc, 0xF862, 0xC618);
-        MP_WriteMcuAccessRegWord(sc, 0xF864, 0x75C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF866, 0x49D4);
-        MP_WriteMcuAccessRegWord(sc, 0xF868, 0xF003);
-        MP_WriteMcuAccessRegWord(sc, 0xF86A, 0x49D0);
-        MP_WriteMcuAccessRegWord(sc, 0xF86C, 0xF104);
-        MP_WriteMcuAccessRegWord(sc, 0xF86E, 0xC60A);
-        MP_WriteMcuAccessRegWord(sc, 0xF870, 0xC50E);
-        MP_WriteMcuAccessRegWord(sc, 0xF872, 0x9DC0);
-        MP_WriteMcuAccessRegWord(sc, 0xF874, 0xB005);
-        MP_WriteMcuAccessRegWord(sc, 0xF876, 0xC607);
-        MP_WriteMcuAccessRegWord(sc, 0xF878, 0x9DC0);
-        MP_WriteMcuAccessRegWord(sc, 0xF87A, 0xB007);
-        MP_WriteMcuAccessRegWord(sc, 0xF87C, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF87E, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF880, 0x1A06);
-        MP_WriteMcuAccessRegWord(sc, 0xF882, 0xB400);
-        MP_WriteMcuAccessRegWord(sc, 0xF884, 0xE86C);
-        MP_WriteMcuAccessRegWord(sc, 0xF886, 0xA000);
-        MP_WriteMcuAccessRegWord(sc, 0xF888, 0x01E1);
-        MP_WriteMcuAccessRegWord(sc, 0xF88A, 0x0200);
-        MP_WriteMcuAccessRegWord(sc, 0xF88C, 0x9200);
-        MP_WriteMcuAccessRegWord(sc, 0xF88E, 0xE84C);
-        MP_WriteMcuAccessRegWord(sc, 0xF890, 0xE004);
-        MP_WriteMcuAccessRegWord(sc, 0xF892, 0xE908);
-        MP_WriteMcuAccessRegWord(sc, 0xF894, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xF896, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF898, 0x0B58);
-        MP_WriteMcuAccessRegWord(sc, 0xF89A, 0xB407);
-        MP_WriteMcuAccessRegWord(sc, 0xF89C, 0xB404);
-        MP_WriteMcuAccessRegWord(sc, 0xF89E, 0x2195);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A0, 0x25BD);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A2, 0x9BE0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A4, 0x1C1C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A6, 0x484F);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A8, 0x9CE2);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AA, 0x72E2);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AC, 0x49AE);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AE, 0xF1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B0, 0x0B00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B2, 0xF116);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B4, 0xC71C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B6, 0xC419);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B8, 0x9CE0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BA, 0x1C13);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BC, 0x484F);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BE, 0x9CE2);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C0, 0x74E2);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C2, 0x49CE);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C4, 0xF1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C6, 0xC412);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C8, 0x9CE0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CA, 0x1C13);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CC, 0x484F);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CE, 0x9CE2);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D0, 0x74E2);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D2, 0x49CE);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D4, 0xF1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D6, 0xC70C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D8, 0x74F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DA, 0x48C3);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DC, 0x8CF8);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DE, 0xB004);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E0, 0xB007);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E2, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E4, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E6, 0x0F24);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E8, 0x0481);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EA, 0x0C81);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EC, 0xDE24);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EE, 0xE000);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F0, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F2, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F4, 0x0CA4);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F6, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F8, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FA, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FC, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FE, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF900, 0x0000);
+static void re_set_mac_mcu_8168h_2(struct re_softc *sc)
+{
+        static const uint16_t mcu_patch_code_8168h_1[] = {
+                0xE008, 0xE00F, 0xE011, 0xE047, 0xE049, 0xE073, 0xE075, 0xE07A, 0xC707,
+                0x1D00, 0x8DE2, 0x48C1, 0xC502, 0xBD00, 0x00E4, 0xE0C0, 0xC502, 0xBD00,
+                0x0216, 0xC634, 0x75C0, 0x49D3, 0xF027, 0xC631, 0x75C0, 0x49D3, 0xF123,
+                0xC627, 0x75C0, 0xB405, 0xC525, 0x9DC0, 0xC621, 0x75C8, 0x49D5, 0xF00A,
+                0x49D6, 0xF008, 0x49D7, 0xF006, 0x49D8, 0xF004, 0x75D2, 0x49D9, 0xF111,
+                0xC517, 0x9DC8, 0xC516, 0x9DD2, 0xC618, 0x75C0, 0x49D4, 0xF003, 0x49D0,
+                0xF104, 0xC60A, 0xC50E, 0x9DC0, 0xB005, 0xC607, 0x9DC0, 0xB007, 0xC602,
+                0xBE00, 0x1A06, 0xB400, 0xE86C, 0xA000, 0x01E1, 0x0200, 0x9200, 0xE84C,
+                0xE004, 0xE908, 0xC502, 0xBD00, 0x0B58, 0xB407, 0xB404, 0x2195, 0x25BD,
+                0x9BE0, 0x1C1C, 0x484F, 0x9CE2, 0x72E2, 0x49AE, 0xF1FE, 0x0B00, 0xF116,
+                0xC71C, 0xC419, 0x9CE0, 0x1C13, 0x484F, 0x9CE2, 0x74E2, 0x49CE, 0xF1FE,
+                0xC412, 0x9CE0, 0x1C13, 0x484F, 0x9CE2, 0x74E2, 0x49CE, 0xF1FE, 0xC70C,
+                0x74F8, 0x48C3, 0x8CF8, 0xB004, 0xB007, 0xC502, 0xBD00, 0x0F24, 0x0481,
+                0x0C81, 0xDE24, 0xE000, 0xC602, 0xBE00, 0x0CA4, 0x48C1, 0x48C2, 0x9C46,
+                0xC402, 0xBC00, 0x0578, 0xC602, 0xBE00, 0x0000
+        };
+
+        DisableMcuBPs(sc);
+
+        re_write_mac_mcu_ram_code(sc, mcu_patch_code_8168h_1, ARRAY_SIZE(mcu_patch_code_8168h_1));
 
         MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
 
@@ -2430,6 +1493,7 @@ static void re_set_mac_mcu_8168h_1(struct re_softc *sc)
         MP_WriteMcuAccessRegWord(sc, 0xFC2E, 0x0B26);
         MP_WriteMcuAccessRegWord(sc, 0xFC30, 0x0F02);
         MP_WriteMcuAccessRegWord(sc, 0xFC32, 0x0CA0);
+        //MP_WriteMcuAccessRegWord(sc, 0xFC34, 0x056C);
 
         if (sc->re_device_id == RT_DEVICEID_8136)
                 MP_WriteMcuAccessRegWord(sc, 0xFC38, 0x0033);
@@ -2437,761 +1501,151 @@ static void re_set_mac_mcu_8168h_1(struct re_softc *sc)
                 MP_WriteMcuAccessRegWord(sc, 0xFC38, 0x003F);
 }
 
+static void re_set_mac_mcu_8168h_3(struct re_softc *sc)
+{
+        DisableMcuBPs(sc);
+}
+
 static void re_set_mac_mcu_8168fp_1(struct re_softc *sc)
 {
+        uint16_t breakPointEnabled = 0;
+
         DisableMcuBPs(sc);
 
-        MP_WriteMcuAccessRegWord(sc, 0xF800, 0xE00A);
-        MP_WriteMcuAccessRegWord(sc, 0xF802, 0xE0C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF804, 0xE104);
-        MP_WriteMcuAccessRegWord(sc, 0xF806, 0xE108);
-        MP_WriteMcuAccessRegWord(sc, 0xF808, 0xE10D);
-        MP_WriteMcuAccessRegWord(sc, 0xF80A, 0xE112);
-        MP_WriteMcuAccessRegWord(sc, 0xF80C, 0xE11C);
-        MP_WriteMcuAccessRegWord(sc, 0xF80E, 0xE121);
-        MP_WriteMcuAccessRegWord(sc, 0xF810, 0xE000);
-        MP_WriteMcuAccessRegWord(sc, 0xF812, 0xE0C8);
-        MP_WriteMcuAccessRegWord(sc, 0xF814, 0xB400);
-        MP_WriteMcuAccessRegWord(sc, 0xF816, 0xC1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xF818, 0x49E2);
-        MP_WriteMcuAccessRegWord(sc, 0xF81A, 0xF04C);
-        MP_WriteMcuAccessRegWord(sc, 0xF81C, 0x49EA);
-        MP_WriteMcuAccessRegWord(sc, 0xF81E, 0xF04A);
-        MP_WriteMcuAccessRegWord(sc, 0xF820, 0x74E6);
-        MP_WriteMcuAccessRegWord(sc, 0xF822, 0xC246);
-        MP_WriteMcuAccessRegWord(sc, 0xF824, 0x7542);
-        MP_WriteMcuAccessRegWord(sc, 0xF826, 0x73EC);
-        MP_WriteMcuAccessRegWord(sc, 0xF828, 0x1800);
-        MP_WriteMcuAccessRegWord(sc, 0xF82A, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF82C, 0xF10D);
-        MP_WriteMcuAccessRegWord(sc, 0xF82E, 0x49C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF830, 0xF10B);
-        MP_WriteMcuAccessRegWord(sc, 0xF832, 0x49C2);
-        MP_WriteMcuAccessRegWord(sc, 0xF834, 0xF109);
-        MP_WriteMcuAccessRegWord(sc, 0xF836, 0x49B0);
-        MP_WriteMcuAccessRegWord(sc, 0xF838, 0xF107);
-        MP_WriteMcuAccessRegWord(sc, 0xF83A, 0x49B1);
-        MP_WriteMcuAccessRegWord(sc, 0xF83C, 0xF105);
-        MP_WriteMcuAccessRegWord(sc, 0xF83E, 0x7220);
-        MP_WriteMcuAccessRegWord(sc, 0xF840, 0x49A2);
-        MP_WriteMcuAccessRegWord(sc, 0xF842, 0xF102);
-        MP_WriteMcuAccessRegWord(sc, 0xF844, 0xE002);
-        MP_WriteMcuAccessRegWord(sc, 0xF846, 0x4800);
-        MP_WriteMcuAccessRegWord(sc, 0xF848, 0x49D0);
-        MP_WriteMcuAccessRegWord(sc, 0xF84A, 0xF10A);
-        MP_WriteMcuAccessRegWord(sc, 0xF84C, 0x49D1);
-        MP_WriteMcuAccessRegWord(sc, 0xF84E, 0xF108);
-        MP_WriteMcuAccessRegWord(sc, 0xF850, 0x49D2);
-        MP_WriteMcuAccessRegWord(sc, 0xF852, 0xF106);
-        MP_WriteMcuAccessRegWord(sc, 0xF854, 0x49D3);
-        MP_WriteMcuAccessRegWord(sc, 0xF856, 0xF104);
-        MP_WriteMcuAccessRegWord(sc, 0xF858, 0x49DF);
-        MP_WriteMcuAccessRegWord(sc, 0xF85A, 0xF102);
-        MP_WriteMcuAccessRegWord(sc, 0xF85C, 0xE00C);
-        MP_WriteMcuAccessRegWord(sc, 0xF85E, 0x4801);
-        MP_WriteMcuAccessRegWord(sc, 0xF860, 0x72E4);
-        MP_WriteMcuAccessRegWord(sc, 0xF862, 0x49AD);
-        MP_WriteMcuAccessRegWord(sc, 0xF864, 0xF108);
-        MP_WriteMcuAccessRegWord(sc, 0xF866, 0xC225);
-        MP_WriteMcuAccessRegWord(sc, 0xF868, 0x6741);
-        MP_WriteMcuAccessRegWord(sc, 0xF86A, 0x48F0);
-        MP_WriteMcuAccessRegWord(sc, 0xF86C, 0x8F41);
-        MP_WriteMcuAccessRegWord(sc, 0xF86E, 0x4870);
-        MP_WriteMcuAccessRegWord(sc, 0xF870, 0x8F41);
-        MP_WriteMcuAccessRegWord(sc, 0xF872, 0xC7CF);
-        MP_WriteMcuAccessRegWord(sc, 0xF874, 0x49B5);
-        MP_WriteMcuAccessRegWord(sc, 0xF876, 0xF01F);
-        MP_WriteMcuAccessRegWord(sc, 0xF878, 0x49B2);
-        MP_WriteMcuAccessRegWord(sc, 0xF87A, 0xF00B);
-        MP_WriteMcuAccessRegWord(sc, 0xF87C, 0x4980);
-        MP_WriteMcuAccessRegWord(sc, 0xF87E, 0xF003);
-        MP_WriteMcuAccessRegWord(sc, 0xF880, 0x484E);
-        MP_WriteMcuAccessRegWord(sc, 0xF882, 0x94E7);
-        MP_WriteMcuAccessRegWord(sc, 0xF884, 0x4981);
-        MP_WriteMcuAccessRegWord(sc, 0xF886, 0xF004);
-        MP_WriteMcuAccessRegWord(sc, 0xF888, 0x485E);
-        MP_WriteMcuAccessRegWord(sc, 0xF88A, 0xC212);
-        MP_WriteMcuAccessRegWord(sc, 0xF88C, 0x9543);
-        MP_WriteMcuAccessRegWord(sc, 0xF88E, 0xE071);
-        MP_WriteMcuAccessRegWord(sc, 0xF890, 0x49B6);
-        MP_WriteMcuAccessRegWord(sc, 0xF892, 0xF003);
-        MP_WriteMcuAccessRegWord(sc, 0xF894, 0x49B3);
-        MP_WriteMcuAccessRegWord(sc, 0xF896, 0xF10F);
-        MP_WriteMcuAccessRegWord(sc, 0xF898, 0x4980);
-        MP_WriteMcuAccessRegWord(sc, 0xF89A, 0xF003);
-        MP_WriteMcuAccessRegWord(sc, 0xF89C, 0x484E);
-        MP_WriteMcuAccessRegWord(sc, 0xF89E, 0x94E7);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A0, 0x4981);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A2, 0xF004);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A4, 0x485E);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A6, 0xC204);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A8, 0x9543);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AA, 0xE005);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AC, 0xE000);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AE, 0xE0FC);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B0, 0xE0FA);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B2, 0xE065);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B4, 0x49B7);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B6, 0xF007);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B8, 0x4980);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BA, 0xF005);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BC, 0x1A38);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BE, 0x46D4);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C0, 0x1200);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C2, 0xF109);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C4, 0x4981);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C6, 0xF055);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C8, 0x49C3);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CA, 0xF105);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CC, 0x1A30);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CE, 0x46D5);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D0, 0x1200);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D2, 0xF04F);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D4, 0x7220);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D6, 0x49A2);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D8, 0xF130);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DA, 0x49C1);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DC, 0xF12E);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DE, 0x49B0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E0, 0xF12C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E2, 0xC2E6);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E4, 0x7240);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E6, 0x49A8);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E8, 0xF003);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EA, 0x49D0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EC, 0xF126);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EE, 0x49A9);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F0, 0xF003);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F2, 0x49D1);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F4, 0xF122);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F6, 0x49AA);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F8, 0xF003);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FA, 0x49D2);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FC, 0xF11E);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FE, 0x49AB);
-        MP_WriteMcuAccessRegWord(sc, 0xF900, 0xF003);
-        MP_WriteMcuAccessRegWord(sc, 0xF902, 0x49DF);
-        MP_WriteMcuAccessRegWord(sc, 0xF904, 0xF11A);
-        MP_WriteMcuAccessRegWord(sc, 0xF906, 0x49AC);
-        MP_WriteMcuAccessRegWord(sc, 0xF908, 0xF003);
-        MP_WriteMcuAccessRegWord(sc, 0xF90A, 0x49D3);
-        MP_WriteMcuAccessRegWord(sc, 0xF90C, 0xF116);
-        MP_WriteMcuAccessRegWord(sc, 0xF90E, 0x4980);
-        MP_WriteMcuAccessRegWord(sc, 0xF910, 0xF003);
-        MP_WriteMcuAccessRegWord(sc, 0xF912, 0x49C7);
-        MP_WriteMcuAccessRegWord(sc, 0xF914, 0xF105);
-        MP_WriteMcuAccessRegWord(sc, 0xF916, 0x4981);
-        MP_WriteMcuAccessRegWord(sc, 0xF918, 0xF02C);
-        MP_WriteMcuAccessRegWord(sc, 0xF91A, 0x49D7);
-        MP_WriteMcuAccessRegWord(sc, 0xF91C, 0xF02A);
-        MP_WriteMcuAccessRegWord(sc, 0xF91E, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF920, 0xF00C);
-        MP_WriteMcuAccessRegWord(sc, 0xF922, 0xC721);
-        MP_WriteMcuAccessRegWord(sc, 0xF924, 0x62F4);
-        MP_WriteMcuAccessRegWord(sc, 0xF926, 0x49A0);
-        MP_WriteMcuAccessRegWord(sc, 0xF928, 0xF008);
-        MP_WriteMcuAccessRegWord(sc, 0xF92A, 0x49A4);
-        MP_WriteMcuAccessRegWord(sc, 0xF92C, 0xF106);
-        MP_WriteMcuAccessRegWord(sc, 0xF92E, 0x4824);
-        MP_WriteMcuAccessRegWord(sc, 0xF930, 0x8AF4);
-        MP_WriteMcuAccessRegWord(sc, 0xF932, 0xC71A);
-        MP_WriteMcuAccessRegWord(sc, 0xF934, 0x1A40);
-        MP_WriteMcuAccessRegWord(sc, 0xF936, 0x9AE0);
-        MP_WriteMcuAccessRegWord(sc, 0xF938, 0x49B6);
-        MP_WriteMcuAccessRegWord(sc, 0xF93A, 0xF017);
-        MP_WriteMcuAccessRegWord(sc, 0xF93C, 0x200E);
-        MP_WriteMcuAccessRegWord(sc, 0xF93E, 0xC7B8);
-        MP_WriteMcuAccessRegWord(sc, 0xF940, 0x72E0);
-        MP_WriteMcuAccessRegWord(sc, 0xF942, 0x4710);
-        MP_WriteMcuAccessRegWord(sc, 0xF944, 0x92E1);
-        MP_WriteMcuAccessRegWord(sc, 0xF946, 0xC70E);
-        MP_WriteMcuAccessRegWord(sc, 0xF948, 0x77E0);
-        MP_WriteMcuAccessRegWord(sc, 0xF94A, 0x49F0);
-        MP_WriteMcuAccessRegWord(sc, 0xF94C, 0xF112);
-        MP_WriteMcuAccessRegWord(sc, 0xF94E, 0xC70B);
-        MP_WriteMcuAccessRegWord(sc, 0xF950, 0x77E0);
-        MP_WriteMcuAccessRegWord(sc, 0xF952, 0x27FE);
-        MP_WriteMcuAccessRegWord(sc, 0xF954, 0x1AFA);
-        MP_WriteMcuAccessRegWord(sc, 0xF956, 0x4317);
-        MP_WriteMcuAccessRegWord(sc, 0xF958, 0xC705);
-        MP_WriteMcuAccessRegWord(sc, 0xF95A, 0x9AE2);
-        MP_WriteMcuAccessRegWord(sc, 0xF95C, 0x1A11);
-        MP_WriteMcuAccessRegWord(sc, 0xF95E, 0x8AE0);
-        MP_WriteMcuAccessRegWord(sc, 0xF960, 0xE008);
-        MP_WriteMcuAccessRegWord(sc, 0xF962, 0xE41C);
-        MP_WriteMcuAccessRegWord(sc, 0xF964, 0xC0AE);
-        MP_WriteMcuAccessRegWord(sc, 0xF966, 0xD23A);
-        MP_WriteMcuAccessRegWord(sc, 0xF968, 0xC7A2);
-        MP_WriteMcuAccessRegWord(sc, 0xF96A, 0x74E6);
-        MP_WriteMcuAccessRegWord(sc, 0xF96C, 0x484F);
-        MP_WriteMcuAccessRegWord(sc, 0xF96E, 0x94E7);
-        MP_WriteMcuAccessRegWord(sc, 0xF970, 0xC79E);
-        MP_WriteMcuAccessRegWord(sc, 0xF972, 0x8CE6);
-        MP_WriteMcuAccessRegWord(sc, 0xF974, 0x8BEC);
-        MP_WriteMcuAccessRegWord(sc, 0xF976, 0xC29C);
-        MP_WriteMcuAccessRegWord(sc, 0xF978, 0x8D42);
-        MP_WriteMcuAccessRegWord(sc, 0xF97A, 0x7220);
-        MP_WriteMcuAccessRegWord(sc, 0xF97C, 0xB000);
-        MP_WriteMcuAccessRegWord(sc, 0xF97E, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xF980, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF982, 0x0932);
-        MP_WriteMcuAccessRegWord(sc, 0xF984, 0xB400);
-        MP_WriteMcuAccessRegWord(sc, 0xF986, 0xC240);
-        MP_WriteMcuAccessRegWord(sc, 0xF988, 0xC340);
-        MP_WriteMcuAccessRegWord(sc, 0xF98A, 0x7060);
-        MP_WriteMcuAccessRegWord(sc, 0xF98C, 0x498F);
-        MP_WriteMcuAccessRegWord(sc, 0xF98E, 0xF014);
-        MP_WriteMcuAccessRegWord(sc, 0xF990, 0x488F);
-        MP_WriteMcuAccessRegWord(sc, 0xF992, 0x9061);
-        MP_WriteMcuAccessRegWord(sc, 0xF994, 0x744C);
-        MP_WriteMcuAccessRegWord(sc, 0xF996, 0x49C3);
-        MP_WriteMcuAccessRegWord(sc, 0xF998, 0xF004);
-        MP_WriteMcuAccessRegWord(sc, 0xF99A, 0x7562);
-        MP_WriteMcuAccessRegWord(sc, 0xF99C, 0x485E);
-        MP_WriteMcuAccessRegWord(sc, 0xF99E, 0x9563);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A0, 0x7446);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A2, 0x49C3);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A4, 0xF106);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A6, 0x7562);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A8, 0x1C30);
-        MP_WriteMcuAccessRegWord(sc, 0xF9AA, 0x46E5);
-        MP_WriteMcuAccessRegWord(sc, 0xF9AC, 0x1200);
-        MP_WriteMcuAccessRegWord(sc, 0xF9AE, 0xF004);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B0, 0x7446);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B2, 0x484F);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B4, 0x9447);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B6, 0xC32A);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B8, 0x7466);
-        MP_WriteMcuAccessRegWord(sc, 0xF9BA, 0x49C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF9BC, 0xF00F);
-        MP_WriteMcuAccessRegWord(sc, 0xF9BE, 0x48C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C0, 0x9C66);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C2, 0x7446);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C4, 0x4840);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C6, 0x4841);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C8, 0x4842);
-        MP_WriteMcuAccessRegWord(sc, 0xF9CA, 0x9C46);
-        MP_WriteMcuAccessRegWord(sc, 0xF9CC, 0x744C);
-        MP_WriteMcuAccessRegWord(sc, 0xF9CE, 0x4840);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D0, 0x9C4C);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D2, 0x744A);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D4, 0x484A);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D6, 0x9C4A);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D8, 0xE013);
-        MP_WriteMcuAccessRegWord(sc, 0xF9DA, 0x498E);
-        MP_WriteMcuAccessRegWord(sc, 0xF9DC, 0xF011);
-        MP_WriteMcuAccessRegWord(sc, 0xF9DE, 0x488E);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E0, 0x9061);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E2, 0x744C);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E4, 0x49C3);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E6, 0xF004);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E8, 0x7446);
-        MP_WriteMcuAccessRegWord(sc, 0xF9EA, 0x484E);
-        MP_WriteMcuAccessRegWord(sc, 0xF9EC, 0x9447);
-        MP_WriteMcuAccessRegWord(sc, 0xF9EE, 0x7446);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F0, 0x1D38);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F2, 0x46EC);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F4, 0x1500);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F6, 0xF004);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F8, 0x7446);
-        MP_WriteMcuAccessRegWord(sc, 0xF9FA, 0x484F);
-        MP_WriteMcuAccessRegWord(sc, 0xF9FC, 0x9447);
-        MP_WriteMcuAccessRegWord(sc, 0xF9FE, 0xB000);
-        MP_WriteMcuAccessRegWord(sc, 0xFA00, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xFA02, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xFA04, 0x074C);
-        MP_WriteMcuAccessRegWord(sc, 0xFA06, 0xE000);
-        MP_WriteMcuAccessRegWord(sc, 0xFA08, 0xE0FC);
-        MP_WriteMcuAccessRegWord(sc, 0xFA0A, 0xE0C0);
-        MP_WriteMcuAccessRegWord(sc, 0xFA0C, 0x4830);
-        MP_WriteMcuAccessRegWord(sc, 0xFA0E, 0x4837);
-        MP_WriteMcuAccessRegWord(sc, 0xFA10, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xFA12, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xFA14, 0x0978);
-        MP_WriteMcuAccessRegWord(sc, 0xFA16, 0x63E2);
-        MP_WriteMcuAccessRegWord(sc, 0xFA18, 0x4830);
-        MP_WriteMcuAccessRegWord(sc, 0xFA1A, 0x4837);
-        MP_WriteMcuAccessRegWord(sc, 0xFA1C, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xFA1E, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xFA20, 0x09FE);
-        MP_WriteMcuAccessRegWord(sc, 0xFA22, 0x73E2);
-        MP_WriteMcuAccessRegWord(sc, 0xFA24, 0x4830);
-        MP_WriteMcuAccessRegWord(sc, 0xFA26, 0x8BE2);
-        MP_WriteMcuAccessRegWord(sc, 0xFA28, 0xC302);
-        MP_WriteMcuAccessRegWord(sc, 0xFA2A, 0xBB00);
-        MP_WriteMcuAccessRegWord(sc, 0xFA2C, 0x0A12);
-        MP_WriteMcuAccessRegWord(sc, 0xFA2E, 0x73E2);
-        MP_WriteMcuAccessRegWord(sc, 0xFA30, 0x48B0);
-        MP_WriteMcuAccessRegWord(sc, 0xFA32, 0x48B3);
-        MP_WriteMcuAccessRegWord(sc, 0xFA34, 0x48B4);
-        MP_WriteMcuAccessRegWord(sc, 0xFA36, 0x48B5);
-        MP_WriteMcuAccessRegWord(sc, 0xFA38, 0x48B6);
-        MP_WriteMcuAccessRegWord(sc, 0xFA3A, 0x48B7);
-        MP_WriteMcuAccessRegWord(sc, 0xFA3C, 0x8BE2);
-        MP_WriteMcuAccessRegWord(sc, 0xFA3E, 0xC302);
-        MP_WriteMcuAccessRegWord(sc, 0xFA40, 0xBB00);
-        MP_WriteMcuAccessRegWord(sc, 0xFA42, 0x0A5A);
-        MP_WriteMcuAccessRegWord(sc, 0xFA44, 0x73E2);
-        MP_WriteMcuAccessRegWord(sc, 0xFA46, 0x4830);
-        MP_WriteMcuAccessRegWord(sc, 0xFA48, 0x8BE2);
-        MP_WriteMcuAccessRegWord(sc, 0xFA4A, 0xC302);
-        MP_WriteMcuAccessRegWord(sc, 0xFA4C, 0xBB00);
-        MP_WriteMcuAccessRegWord(sc, 0xFA4E, 0x0A6C);
-        MP_WriteMcuAccessRegWord(sc, 0xFA50, 0x73E2);
-        MP_WriteMcuAccessRegWord(sc, 0xFA52, 0x4830);
-        MP_WriteMcuAccessRegWord(sc, 0xFA54, 0x4837);
-        MP_WriteMcuAccessRegWord(sc, 0xFA56, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xFA58, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xFA5A, 0x0A86);
+        if(sc->HwPkgDet == 0x00 || sc->HwPkgDet == 0x0F) {
+                static const uint16_t mcu_patch_code_8168fp_1_1[] = {
+                        0xE00A, 0xE0C1, 0xE104, 0xE108, 0xE10D, 0xE112, 0xE11C, 0xE121, 0xE000,
+                        0xE0C8, 0xB400, 0xC1FE, 0x49E2, 0xF04C, 0x49EA, 0xF04A, 0x74E6, 0xC246,
+                        0x7542, 0x73EC, 0x1800, 0x49C0, 0xF10D, 0x49C1, 0xF10B, 0x49C2, 0xF109,
+                        0x49B0, 0xF107, 0x49B1, 0xF105, 0x7220, 0x49A2, 0xF102, 0xE002, 0x4800,
+                        0x49D0, 0xF10A, 0x49D1, 0xF108, 0x49D2, 0xF106, 0x49D3, 0xF104, 0x49DF,
+                        0xF102, 0xE00C, 0x4801, 0x72E4, 0x49AD, 0xF108, 0xC225, 0x6741, 0x48F0,
+                        0x8F41, 0x4870, 0x8F41, 0xC7CF, 0x49B5, 0xF01F, 0x49B2, 0xF00B, 0x4980,
+                        0xF003, 0x484E, 0x94E7, 0x4981, 0xF004, 0x485E, 0xC212, 0x9543, 0xE071,
+                        0x49B6, 0xF003, 0x49B3, 0xF10F, 0x4980, 0xF003, 0x484E, 0x94E7, 0x4981,
+                        0xF004, 0x485E, 0xC204, 0x9543, 0xE005, 0xE000, 0xE0FC, 0xE0FA, 0xE065,
+                        0x49B7, 0xF007, 0x4980, 0xF005, 0x1A38, 0x46D4, 0x1200, 0xF109, 0x4981,
+                        0xF055, 0x49C3, 0xF105, 0x1A30, 0x46D5, 0x1200, 0xF04F, 0x7220, 0x49A2,
+                        0xF130, 0x49C1, 0xF12E, 0x49B0, 0xF12C, 0xC2E6, 0x7240, 0x49A8, 0xF003,
+                        0x49D0, 0xF126, 0x49A9, 0xF003, 0x49D1, 0xF122, 0x49AA, 0xF003, 0x49D2,
+                        0xF11E, 0x49AB, 0xF003, 0x49DF, 0xF11A, 0x49AC, 0xF003, 0x49D3, 0xF116,
+                        0x4980, 0xF003, 0x49C7, 0xF105, 0x4981, 0xF02C, 0x49D7, 0xF02A, 0x49C0,
+                        0xF00C, 0xC721, 0x62F4, 0x49A0, 0xF008, 0x49A4, 0xF106, 0x4824, 0x8AF4,
+                        0xC71A, 0x1A40, 0x9AE0, 0x49B6, 0xF017, 0x200E, 0xC7B8, 0x72E0, 0x4710,
+                        0x92E1, 0xC70E, 0x77E0, 0x49F0, 0xF112, 0xC70B, 0x77E0, 0x27FE, 0x1AFA,
+                        0x4317, 0xC705, 0x9AE2, 0x1A11, 0x8AE0, 0xE008, 0xE41C, 0xC0AE, 0xD23A,
+                        0xC7A2, 0x74E6, 0x484F, 0x94E7, 0xC79E, 0x8CE6, 0x8BEC, 0xC29C, 0x8D42,
+                        0x7220, 0xB000, 0xC502, 0xBD00, 0x0932, 0xB400, 0xC240, 0xC340, 0x7060,
+                        0x498F, 0xF014, 0x488F, 0x9061, 0x744C, 0x49C3, 0xF004, 0x7562, 0x485E,
+                        0x9563, 0x7446, 0x49C3, 0xF106, 0x7562, 0x1C30, 0x46E5, 0x1200, 0xF004,
+                        0x7446, 0x484F, 0x9447, 0xC32A, 0x7466, 0x49C0, 0xF00F, 0x48C0, 0x9C66,
+                        0x7446, 0x4840, 0x4841, 0x4842, 0x9C46, 0x744C, 0x4840, 0x9C4C, 0x744A,
+                        0x484A, 0x9C4A, 0xE013, 0x498E, 0xF011, 0x488E, 0x9061, 0x744C, 0x49C3,
+                        0xF004, 0x7446, 0x484E, 0x9447, 0x7446, 0x1D38, 0x46EC, 0x1500, 0xF004,
+                        0x7446, 0x484F, 0x9447, 0xB000, 0xC502, 0xBD00, 0x074C, 0xE000, 0xE0FC,
+                        0xE0C0, 0x4830, 0x4837, 0xC502, 0xBD00, 0x0978, 0x63E2, 0x4830, 0x4837,
+                        0xC502, 0xBD00, 0x09FE, 0x73E2, 0x4830, 0x8BE2, 0xC302, 0xBB00, 0x0A12,
+                        0x73E2, 0x48B0, 0x48B3, 0x48B4, 0x48B5, 0x48B6, 0x48B7, 0x8BE2, 0xC302,
+                        0xBB00, 0x0A5A, 0x73E2, 0x4830, 0x8BE2, 0xC302, 0xBB00, 0x0A6C, 0x73E2,
+                        0x4830, 0x4837, 0xC502, 0xBD00, 0x0A86
+                };
 
-        MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
+                re_write_mac_mcu_ram_code(sc, mcu_patch_code_8168fp_1_1, ARRAY_SIZE(mcu_patch_code_8168fp_1_1));
 
-        MP_WriteMcuAccessRegWord(sc, 0xFC28, 0x0890);
-        MP_WriteMcuAccessRegWord(sc, 0xFC2A, 0x0712);
-        MP_WriteMcuAccessRegWord(sc, 0xFC2C, 0x0974);
-        MP_WriteMcuAccessRegWord(sc, 0xFC2E, 0x09FC);
-        MP_WriteMcuAccessRegWord(sc, 0xFC30, 0x0A0E);
-        MP_WriteMcuAccessRegWord(sc, 0xFC32, 0x0A56);
-        MP_WriteMcuAccessRegWord(sc, 0xFC34, 0x0A68);
-        MP_WriteMcuAccessRegWord(sc, 0xFC36, 0x0A84);
+                MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
 
-        if (sc->HwPkgDet == 0x0)
-                MP_WriteMcuAccessRegWord(sc, 0xFC38, 0x00FC);
-        else if(sc->HwPkgDet == 0xF)
-                MP_WriteMcuAccessRegWord(sc, 0xFC38, 0x00FF);
+                MP_WriteMcuAccessRegWord(sc, 0xFC28, 0x0890);
+                MP_WriteMcuAccessRegWord(sc, 0xFC2A, 0x0712);
+                MP_WriteMcuAccessRegWord(sc, 0xFC2C, 0x0974);
+                MP_WriteMcuAccessRegWord(sc, 0xFC2E, 0x09FC);
+                MP_WriteMcuAccessRegWord(sc, 0xFC30, 0x0A0E);
+                MP_WriteMcuAccessRegWord(sc, 0xFC32, 0x0A56);
+                MP_WriteMcuAccessRegWord(sc, 0xFC34, 0x0A68);
+                MP_WriteMcuAccessRegWord(sc, 0xFC36, 0x0A84);
+
+        } else if (sc->HwPkgDet == 0x6) {
+                static const uint16_t mcu_patch_code_8168fp_1_2[] = {
+                        0xE008, 0xE00A, 0xE031, 0xE033, 0xE035, 0xE144, 0xE166, 0xE168, 0xC502,
+                        0xBD00, 0x0000, 0xC725, 0x75E0, 0x48D0, 0x9DE0, 0xC722, 0x75E0, 0x1C78,
+                        0x416C, 0x1530, 0xF111, 0xC71D, 0x75F6, 0x49D1, 0xF00D, 0x75E0, 0x1C1F,
+                        0x416C, 0x1502, 0xF108, 0x75FA, 0x49D3, 0xF005, 0x75EC, 0x9DE4, 0x4853,
+                        0x9DFA, 0xC70B, 0x75E0, 0x4852, 0x4850, 0x9DE0, 0xC602, 0xBE00, 0x04B8,
+                        0xE420, 0xE000, 0xE0FC, 0xE43C, 0xDC00, 0xEB00, 0xC202, 0xBA00, 0x0000,
+                        0xC002, 0xB800, 0x0000, 0xB401, 0xB402, 0xB403, 0xB404, 0xB405, 0xB406,
+                        0xC44D, 0xC54D, 0x1867, 0xE8A2, 0x2318, 0x276E, 0x1601, 0xF106, 0x1A07,
+                        0xE861, 0xE86B, 0xE873, 0xE037, 0x231E, 0x276E, 0x1602, 0xF10B, 0x1A07,
+                        0xE858, 0xE862, 0xC247, 0xC344, 0xE8E3, 0xC73B, 0x66E0, 0xE8B5, 0xE029,
+                        0x231A, 0x276C, 0xC733, 0x9EE0, 0x1866, 0xE885, 0x251C, 0x120F, 0xF011,
+                        0x1209, 0xF011, 0x2014, 0x240E, 0x1000, 0xF007, 0x120C, 0xF00D, 0x1203,
+                        0xF00D, 0x1200, 0xF00D, 0x120C, 0xF00D, 0x1203, 0xF00D, 0x1A03, 0xE00C,
+                        0x1A07, 0xE00A, 0x1A00, 0xE008, 0x1A01, 0xE006, 0x1A02, 0xE004, 0x1A04,
+                        0xE002, 0x1A05, 0xE829, 0xE833, 0xB006, 0xB005, 0xB004, 0xB003, 0xB002,
+                        0xB001, 0x60C4, 0xC702, 0xBF00, 0x2786, 0xDD00, 0xD030, 0xE0C4, 0xE0F8,
+                        0xDC42, 0xD3F0, 0x0000, 0x0004, 0x0007, 0x0014, 0x0090, 0x1000, 0x0F00,
+                        0x1004, 0x1008, 0x3000, 0x3004, 0x3008, 0x4000, 0x7777, 0x8000, 0x8001,
+                        0x8008, 0x8003, 0x8004, 0xC000, 0xC004, 0xF004, 0xFFFF, 0xB406, 0xB407,
+                        0xC6E5, 0x77C0, 0x27F3, 0x23F3, 0x47FA, 0x9FC0, 0xB007, 0xB006, 0xFF80,
+                        0xB405, 0xB407, 0xC7D8, 0x75E0, 0x48D0, 0x9DE0, 0xB007, 0xB005, 0xFF80,
+                        0xB401, 0xC0EA, 0xC2DC, 0xC3D8, 0xE865, 0xC0D3, 0xC1E0, 0xC2E3, 0xE861,
+                        0xE817, 0xC0CD, 0xC2CF, 0xE85D, 0xC0C9, 0xC1D6, 0xC2DB, 0xE859, 0xE80F,
+                        0xC1C7, 0xC2CE, 0xE855, 0xC0C0, 0xC1D1, 0xC2D3, 0xE851, 0xE807, 0xC0BE,
+                        0xC2C2, 0xE84D, 0xE803, 0xB001, 0xFF80, 0xB402, 0xC2C6, 0xE859, 0x499F,
+                        0xF1FE, 0xB002, 0xFF80, 0xB402, 0xB403, 0xB407, 0xE821, 0x8882, 0x1980,
+                        0x8983, 0xE81D, 0x7180, 0x218B, 0x25BB, 0x1310, 0xF014, 0x1310, 0xFB03,
+                        0x1F20, 0x38FB, 0x3288, 0x434B, 0x2491, 0x430B, 0x1F0F, 0x38FB, 0x4313,
+                        0x2121, 0x4353, 0x2521, 0x418A, 0x6282, 0x2527, 0x212F, 0x418A, 0xB007,
+                        0xB003, 0xB002, 0xFF80, 0x6183, 0x2496, 0x1100, 0xF1FD, 0xFF80, 0x4800,
+                        0x4801, 0xC213, 0xC313, 0xE815, 0x4860, 0x8EE0, 0xC210, 0xC310, 0xE822,
+                        0x481E, 0xC20C, 0xC30C, 0xE80C, 0xC206, 0x7358, 0x483A, 0x9B58, 0xFF80,
+                        0xE8E0, 0xE000, 0x1008, 0x0F00, 0x800C, 0x0F00, 0xB407, 0xB406, 0xB403,
+                        0xC7F7, 0x98E0, 0x99E2, 0x9AE4, 0x21B2, 0x4831, 0x483F, 0x9BE6, 0x66E7,
+                        0x49E6, 0xF1FE, 0xB003, 0xB006, 0xB007, 0xFF80, 0xB407, 0xB406, 0xB403,
+                        0xC7E5, 0x9AE4, 0x21B2, 0x4831, 0x9BE6, 0x66E7, 0x49E6, 0xF1FE, 0x70E0,
+                        0x71E2, 0xB003, 0xB006, 0xB007, 0xFF80, 0x4882, 0xB406, 0xB405, 0xC71E,
+                        0x76E0, 0x1D78, 0x4175, 0x1630, 0xF10C, 0xC715, 0x76E0, 0x4861, 0x9EE0,
+                        0xC713, 0x1EFF, 0x9EE2, 0x75E0, 0x4850, 0x9DE0, 0xE005, 0xC70B, 0x76E0,
+                        0x4865, 0x9EE0, 0xB005, 0xB006, 0xC708, 0xC102, 0xB900, 0x279E, 0xEB16,
+                        0xEB00, 0xE43C, 0xDC00, 0xD3EC, 0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00,
+                        0x0000
+                };
+
+                re_write_mac_mcu_ram_code(sc, mcu_patch_code_8168fp_1_2, ARRAY_SIZE(mcu_patch_code_8168fp_1_2));
+
+                MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
+
+                MP_WriteMcuAccessRegWord(sc, 0xFC28, 0x0000);
+                MP_WriteMcuAccessRegWord(sc, 0xFC2A, 0x04b4);
+                MP_WriteMcuAccessRegWord(sc, 0xFC2C, 0x0000);
+                MP_WriteMcuAccessRegWord(sc, 0xFC2E, 0x0000);
+                MP_WriteMcuAccessRegWord(sc, 0xFC30, 0x0000);
+                MP_WriteMcuAccessRegWord(sc, 0xFC32, 0x279C);
+                MP_WriteMcuAccessRegWord(sc, 0xFC34, 0x0000);
+                MP_WriteMcuAccessRegWord(sc, 0xFC36, 0x0000);
+        }
+
+        if (sc->HwPkgDet == 0x00)
+                breakPointEnabled = 0x00FC;
+        else if (sc->HwPkgDet == 0x0F)
+                breakPointEnabled = 0x00FF;
+        else if (sc->HwPkgDet == 0x06)
+                breakPointEnabled = 0x0022;
+
+        MP_WriteMcuAccessRegWord(sc, 0xFC38, breakPointEnabled);
 }
 
-static void re_set_mac_mcu_8168fp_2(struct re_softc *sc)
+static void re_set_mac_mcu_8168fp_8116as_2(struct re_softc *sc)
 {
+        static const uint16_t mcu_patch_code_8168fp_2[] = {
+                0xE008, 0xE00A, 0xE00F, 0xE014, 0xE016, 0xE018, 0xE01A, 0xE01C, 0xC602,
+                0xBE00, 0x2AB2, 0x1BC0, 0x46EB, 0x1BFE, 0xC102, 0xB900, 0x0B1A, 0x1BC0,
+                0x46EB, 0x1B7E, 0xC102, 0xB900, 0x0BEA, 0xC602, 0xBE00, 0x0000, 0xC602,
+                0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000, 0xC602,
+                0xBE00, 0x0000
+        };
+
         DisableMcuBPs(sc);
 
-        MP_WriteMcuAccessRegWord(sc, 0xF800, 0xE008);
-        MP_WriteMcuAccessRegWord(sc, 0xF802, 0xE00A);
-        MP_WriteMcuAccessRegWord(sc, 0xF804, 0xE031);
-        MP_WriteMcuAccessRegWord(sc, 0xF806, 0xE033);
-        MP_WriteMcuAccessRegWord(sc, 0xF808, 0xE035);
-        MP_WriteMcuAccessRegWord(sc, 0xF80A, 0xE144);
-        MP_WriteMcuAccessRegWord(sc, 0xF80C, 0xE166);
-        MP_WriteMcuAccessRegWord(sc, 0xF80E, 0xE168);
-        MP_WriteMcuAccessRegWord(sc, 0xF810, 0xC502);
-        MP_WriteMcuAccessRegWord(sc, 0xF812, 0xBD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF814, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF816, 0xC725);
-        MP_WriteMcuAccessRegWord(sc, 0xF818, 0x75E0);
-        MP_WriteMcuAccessRegWord(sc, 0xF81A, 0x48D0);
-        MP_WriteMcuAccessRegWord(sc, 0xF81C, 0x9DE0);
-        MP_WriteMcuAccessRegWord(sc, 0xF81E, 0xC722);
-        MP_WriteMcuAccessRegWord(sc, 0xF820, 0x75E0);
-        MP_WriteMcuAccessRegWord(sc, 0xF822, 0x1C78);
-        MP_WriteMcuAccessRegWord(sc, 0xF824, 0x416C);
-        MP_WriteMcuAccessRegWord(sc, 0xF826, 0x1530);
-        MP_WriteMcuAccessRegWord(sc, 0xF828, 0xF111);
-        MP_WriteMcuAccessRegWord(sc, 0xF82A, 0xC71D);
-        MP_WriteMcuAccessRegWord(sc, 0xF82C, 0x75F6);
-        MP_WriteMcuAccessRegWord(sc, 0xF82E, 0x49D1);
-        MP_WriteMcuAccessRegWord(sc, 0xF830, 0xF00D);
-        MP_WriteMcuAccessRegWord(sc, 0xF832, 0x75E0);
-        MP_WriteMcuAccessRegWord(sc, 0xF834, 0x1C1F);
-        MP_WriteMcuAccessRegWord(sc, 0xF836, 0x416C);
-        MP_WriteMcuAccessRegWord(sc, 0xF838, 0x1502);
-        MP_WriteMcuAccessRegWord(sc, 0xF83A, 0xF108);
-        MP_WriteMcuAccessRegWord(sc, 0xF83C, 0x75FA);
-        MP_WriteMcuAccessRegWord(sc, 0xF83E, 0x49D3);
-        MP_WriteMcuAccessRegWord(sc, 0xF840, 0xF005);
-        MP_WriteMcuAccessRegWord(sc, 0xF842, 0x75EC);
-        MP_WriteMcuAccessRegWord(sc, 0xF844, 0x9DE4);
-        MP_WriteMcuAccessRegWord(sc, 0xF846, 0x4853);
-        MP_WriteMcuAccessRegWord(sc, 0xF848, 0x9DFA);
-        MP_WriteMcuAccessRegWord(sc, 0xF84A, 0xC70B);
-        MP_WriteMcuAccessRegWord(sc, 0xF84C, 0x75E0);
-        MP_WriteMcuAccessRegWord(sc, 0xF84E, 0x4852);
-        MP_WriteMcuAccessRegWord(sc, 0xF850, 0x4850);
-        MP_WriteMcuAccessRegWord(sc, 0xF852, 0x9DE0);
-        MP_WriteMcuAccessRegWord(sc, 0xF854, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF856, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF858, 0x04B8);
-        MP_WriteMcuAccessRegWord(sc, 0xF85A, 0xE420);
-        MP_WriteMcuAccessRegWord(sc, 0xF85C, 0xE000);
-        MP_WriteMcuAccessRegWord(sc, 0xF85E, 0xE0FC);
-        MP_WriteMcuAccessRegWord(sc, 0xF860, 0xE43C);
-        MP_WriteMcuAccessRegWord(sc, 0xF862, 0xDC00);
-        MP_WriteMcuAccessRegWord(sc, 0xF864, 0xEB00);
-        MP_WriteMcuAccessRegWord(sc, 0xF866, 0xC202);
-        MP_WriteMcuAccessRegWord(sc, 0xF868, 0xBA00);
-        MP_WriteMcuAccessRegWord(sc, 0xF86A, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF86C, 0xC002);
-        MP_WriteMcuAccessRegWord(sc, 0xF86E, 0xB800);
-        MP_WriteMcuAccessRegWord(sc, 0xF870, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF872, 0xB401);
-        MP_WriteMcuAccessRegWord(sc, 0xF874, 0xB402);
-        MP_WriteMcuAccessRegWord(sc, 0xF876, 0xB403);
-        MP_WriteMcuAccessRegWord(sc, 0xF878, 0xB404);
-        MP_WriteMcuAccessRegWord(sc, 0xF87A, 0xB405);
-        MP_WriteMcuAccessRegWord(sc, 0xF87C, 0xB406);
-        MP_WriteMcuAccessRegWord(sc, 0xF87E, 0xC44D);
-        MP_WriteMcuAccessRegWord(sc, 0xF880, 0xC54D);
-        MP_WriteMcuAccessRegWord(sc, 0xF882, 0x1867);
-        MP_WriteMcuAccessRegWord(sc, 0xF884, 0xE8A2);
-        MP_WriteMcuAccessRegWord(sc, 0xF886, 0x2318);
-        MP_WriteMcuAccessRegWord(sc, 0xF888, 0x276E);
-        MP_WriteMcuAccessRegWord(sc, 0xF88A, 0x1601);
-        MP_WriteMcuAccessRegWord(sc, 0xF88C, 0xF106);
-        MP_WriteMcuAccessRegWord(sc, 0xF88E, 0x1A07);
-        MP_WriteMcuAccessRegWord(sc, 0xF890, 0xE861);
-        MP_WriteMcuAccessRegWord(sc, 0xF892, 0xE86B);
-        MP_WriteMcuAccessRegWord(sc, 0xF894, 0xE873);
-        MP_WriteMcuAccessRegWord(sc, 0xF896, 0xE037);
-        MP_WriteMcuAccessRegWord(sc, 0xF898, 0x231E);
-        MP_WriteMcuAccessRegWord(sc, 0xF89A, 0x276E);
-        MP_WriteMcuAccessRegWord(sc, 0xF89C, 0x1602);
-        MP_WriteMcuAccessRegWord(sc, 0xF89E, 0xF10B);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A0, 0x1A07);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A2, 0xE858);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A4, 0xE862);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A6, 0xC247);
-        MP_WriteMcuAccessRegWord(sc, 0xF8A8, 0xC344);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AA, 0xE8E3);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AC, 0xC73B);
-        MP_WriteMcuAccessRegWord(sc, 0xF8AE, 0x66E0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B0, 0xE8B5);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B2, 0xE029);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B4, 0x231A);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B6, 0x276C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8B8, 0xC733);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BA, 0x9EE0);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BC, 0x1866);
-        MP_WriteMcuAccessRegWord(sc, 0xF8BE, 0xE885);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C0, 0x251C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C2, 0x120F);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C4, 0xF011);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C6, 0x1209);
-        MP_WriteMcuAccessRegWord(sc, 0xF8C8, 0xF011);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CA, 0x2014);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CC, 0x240E);
-        MP_WriteMcuAccessRegWord(sc, 0xF8CE, 0x1000);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D0, 0xF007);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D2, 0x120C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D4, 0xF00D);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D6, 0x1203);
-        MP_WriteMcuAccessRegWord(sc, 0xF8D8, 0xF00D);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DA, 0x1200);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DC, 0xF00D);
-        MP_WriteMcuAccessRegWord(sc, 0xF8DE, 0x120C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E0, 0xF00D);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E2, 0x1203);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E4, 0xF00D);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E6, 0x1A03);
-        MP_WriteMcuAccessRegWord(sc, 0xF8E8, 0xE00C);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EA, 0x1A07);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EC, 0xE00A);
-        MP_WriteMcuAccessRegWord(sc, 0xF8EE, 0x1A00);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F0, 0xE008);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F2, 0x1A01);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F4, 0xE006);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F6, 0x1A02);
-        MP_WriteMcuAccessRegWord(sc, 0xF8F8, 0xE004);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FA, 0x1A04);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FC, 0xE002);
-        MP_WriteMcuAccessRegWord(sc, 0xF8FE, 0x1A05);
-        MP_WriteMcuAccessRegWord(sc, 0xF900, 0xE829);
-        MP_WriteMcuAccessRegWord(sc, 0xF902, 0xE833);
-        MP_WriteMcuAccessRegWord(sc, 0xF904, 0xB006);
-        MP_WriteMcuAccessRegWord(sc, 0xF906, 0xB005);
-        MP_WriteMcuAccessRegWord(sc, 0xF908, 0xB004);
-        MP_WriteMcuAccessRegWord(sc, 0xF90A, 0xB003);
-        MP_WriteMcuAccessRegWord(sc, 0xF90C, 0xB002);
-        MP_WriteMcuAccessRegWord(sc, 0xF90E, 0xB001);
-        MP_WriteMcuAccessRegWord(sc, 0xF910, 0x60C4);
-        MP_WriteMcuAccessRegWord(sc, 0xF912, 0xC702);
-        MP_WriteMcuAccessRegWord(sc, 0xF914, 0xBF00);
-        MP_WriteMcuAccessRegWord(sc, 0xF916, 0x2786);
-        MP_WriteMcuAccessRegWord(sc, 0xF918, 0xDD00);
-        MP_WriteMcuAccessRegWord(sc, 0xF91A, 0xD030);
-        MP_WriteMcuAccessRegWord(sc, 0xF91C, 0xE0C4);
-        MP_WriteMcuAccessRegWord(sc, 0xF91E, 0xE0F8);
-        MP_WriteMcuAccessRegWord(sc, 0xF920, 0xDC42);
-        MP_WriteMcuAccessRegWord(sc, 0xF922, 0xD3F0);
-        MP_WriteMcuAccessRegWord(sc, 0xF924, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF926, 0x0004);
-        MP_WriteMcuAccessRegWord(sc, 0xF928, 0x0007);
-        MP_WriteMcuAccessRegWord(sc, 0xF92A, 0x0014);
-        MP_WriteMcuAccessRegWord(sc, 0xF92C, 0x0090);
-        MP_WriteMcuAccessRegWord(sc, 0xF92E, 0x1000);
-        MP_WriteMcuAccessRegWord(sc, 0xF930, 0x0F00);
-        MP_WriteMcuAccessRegWord(sc, 0xF932, 0x1004);
-        MP_WriteMcuAccessRegWord(sc, 0xF934, 0x1008);
-        MP_WriteMcuAccessRegWord(sc, 0xF936, 0x3000);
-        MP_WriteMcuAccessRegWord(sc, 0xF938, 0x3004);
-        MP_WriteMcuAccessRegWord(sc, 0xF93A, 0x3008);
-        MP_WriteMcuAccessRegWord(sc, 0xF93C, 0x4000);
-        MP_WriteMcuAccessRegWord(sc, 0xF93E, 0x7777);
-        MP_WriteMcuAccessRegWord(sc, 0xF940, 0x8000);
-        MP_WriteMcuAccessRegWord(sc, 0xF942, 0x8001);
-        MP_WriteMcuAccessRegWord(sc, 0xF944, 0x8008);
-        MP_WriteMcuAccessRegWord(sc, 0xF946, 0x8003);
-        MP_WriteMcuAccessRegWord(sc, 0xF948, 0x8004);
-        MP_WriteMcuAccessRegWord(sc, 0xF94A, 0xC000);
-        MP_WriteMcuAccessRegWord(sc, 0xF94C, 0xC004);
-        MP_WriteMcuAccessRegWord(sc, 0xF94E, 0xF004);
-        MP_WriteMcuAccessRegWord(sc, 0xF950, 0xFFFF);
-        MP_WriteMcuAccessRegWord(sc, 0xF952, 0xB406);
-        MP_WriteMcuAccessRegWord(sc, 0xF954, 0xB407);
-        MP_WriteMcuAccessRegWord(sc, 0xF956, 0xC6E5);
-        MP_WriteMcuAccessRegWord(sc, 0xF958, 0x77C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF95A, 0x27F3);
-        MP_WriteMcuAccessRegWord(sc, 0xF95C, 0x23F3);
-        MP_WriteMcuAccessRegWord(sc, 0xF95E, 0x47FA);
-        MP_WriteMcuAccessRegWord(sc, 0xF960, 0x9FC0);
-        MP_WriteMcuAccessRegWord(sc, 0xF962, 0xB007);
-        MP_WriteMcuAccessRegWord(sc, 0xF964, 0xB006);
-        MP_WriteMcuAccessRegWord(sc, 0xF966, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xF968, 0xB405);
-        MP_WriteMcuAccessRegWord(sc, 0xF96A, 0xB407);
-        MP_WriteMcuAccessRegWord(sc, 0xF96C, 0xC7D8);
-        MP_WriteMcuAccessRegWord(sc, 0xF96E, 0x75E0);
-        MP_WriteMcuAccessRegWord(sc, 0xF970, 0x48D0);
-        MP_WriteMcuAccessRegWord(sc, 0xF972, 0x9DE0);
-        MP_WriteMcuAccessRegWord(sc, 0xF974, 0xB007);
-        MP_WriteMcuAccessRegWord(sc, 0xF976, 0xB005);
-        MP_WriteMcuAccessRegWord(sc, 0xF978, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xF97A, 0xB401);
-        MP_WriteMcuAccessRegWord(sc, 0xF97C, 0xC0EA);
-        MP_WriteMcuAccessRegWord(sc, 0xF97E, 0xC2DC);
-        MP_WriteMcuAccessRegWord(sc, 0xF980, 0xC3D8);
-        MP_WriteMcuAccessRegWord(sc, 0xF982, 0xE865);
-        MP_WriteMcuAccessRegWord(sc, 0xF984, 0xC0D3);
-        MP_WriteMcuAccessRegWord(sc, 0xF986, 0xC1E0);
-        MP_WriteMcuAccessRegWord(sc, 0xF988, 0xC2E3);
-        MP_WriteMcuAccessRegWord(sc, 0xF98A, 0xE861);
-        MP_WriteMcuAccessRegWord(sc, 0xF98C, 0xE817);
-        MP_WriteMcuAccessRegWord(sc, 0xF98E, 0xC0CD);
-        MP_WriteMcuAccessRegWord(sc, 0xF990, 0xC2CF);
-        MP_WriteMcuAccessRegWord(sc, 0xF992, 0xE85D);
-        MP_WriteMcuAccessRegWord(sc, 0xF994, 0xC0C9);
-        MP_WriteMcuAccessRegWord(sc, 0xF996, 0xC1D6);
-        MP_WriteMcuAccessRegWord(sc, 0xF998, 0xC2DB);
-        MP_WriteMcuAccessRegWord(sc, 0xF99A, 0xE859);
-        MP_WriteMcuAccessRegWord(sc, 0xF99C, 0xE80F);
-        MP_WriteMcuAccessRegWord(sc, 0xF99E, 0xC1C7);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A0, 0xC2CE);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A2, 0xE855);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A4, 0xC0C0);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A6, 0xC1D1);
-        MP_WriteMcuAccessRegWord(sc, 0xF9A8, 0xC2D3);
-        MP_WriteMcuAccessRegWord(sc, 0xF9AA, 0xE851);
-        MP_WriteMcuAccessRegWord(sc, 0xF9AC, 0xE807);
-        MP_WriteMcuAccessRegWord(sc, 0xF9AE, 0xC0BE);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B0, 0xC2C2);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B2, 0xE84D);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B4, 0xE803);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B6, 0xB001);
-        MP_WriteMcuAccessRegWord(sc, 0xF9B8, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xF9BA, 0xB402);
-        MP_WriteMcuAccessRegWord(sc, 0xF9BC, 0xC2C6);
-        MP_WriteMcuAccessRegWord(sc, 0xF9BE, 0xE859);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C0, 0x499F);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C2, 0xF1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C4, 0xB002);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C6, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xF9C8, 0xB402);
-        MP_WriteMcuAccessRegWord(sc, 0xF9CA, 0xB403);
-        MP_WriteMcuAccessRegWord(sc, 0xF9CC, 0xB407);
-        MP_WriteMcuAccessRegWord(sc, 0xF9CE, 0xE821);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D0, 0x8882);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D2, 0x1980);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D4, 0x8983);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D6, 0xE81D);
-        MP_WriteMcuAccessRegWord(sc, 0xF9D8, 0x7180);
-        MP_WriteMcuAccessRegWord(sc, 0xF9DA, 0x218B);
-        MP_WriteMcuAccessRegWord(sc, 0xF9DC, 0x25BB);
-        MP_WriteMcuAccessRegWord(sc, 0xF9DE, 0x1310);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E0, 0xF014);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E2, 0x1310);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E4, 0xFB03);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E6, 0x1F20);
-        MP_WriteMcuAccessRegWord(sc, 0xF9E8, 0x38FB);
-        MP_WriteMcuAccessRegWord(sc, 0xF9EA, 0x3288);
-        MP_WriteMcuAccessRegWord(sc, 0xF9EC, 0x434B);
-        MP_WriteMcuAccessRegWord(sc, 0xF9EE, 0x2491);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F0, 0x430B);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F2, 0x1F0F);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F4, 0x38FB);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F6, 0x4313);
-        MP_WriteMcuAccessRegWord(sc, 0xF9F8, 0x2121);
-        MP_WriteMcuAccessRegWord(sc, 0xF9FA, 0x4353);
-        MP_WriteMcuAccessRegWord(sc, 0xF9FC, 0x2521);
-        MP_WriteMcuAccessRegWord(sc, 0xF9FE, 0x418A);
-        MP_WriteMcuAccessRegWord(sc, 0xFA00, 0x6282);
-        MP_WriteMcuAccessRegWord(sc, 0xFA02, 0x2527);
-        MP_WriteMcuAccessRegWord(sc, 0xFA04, 0x212F);
-        MP_WriteMcuAccessRegWord(sc, 0xFA06, 0x418A);
-        MP_WriteMcuAccessRegWord(sc, 0xFA08, 0xB007);
-        MP_WriteMcuAccessRegWord(sc, 0xFA0A, 0xB003);
-        MP_WriteMcuAccessRegWord(sc, 0xFA0C, 0xB002);
-        MP_WriteMcuAccessRegWord(sc, 0xFA0E, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xFA10, 0x6183);
-        MP_WriteMcuAccessRegWord(sc, 0xFA12, 0x2496);
-        MP_WriteMcuAccessRegWord(sc, 0xFA14, 0x1100);
-        MP_WriteMcuAccessRegWord(sc, 0xFA16, 0xF1FD);
-        MP_WriteMcuAccessRegWord(sc, 0xFA18, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xFA1A, 0x4800);
-        MP_WriteMcuAccessRegWord(sc, 0xFA1C, 0x4801);
-        MP_WriteMcuAccessRegWord(sc, 0xFA1E, 0xC213);
-        MP_WriteMcuAccessRegWord(sc, 0xFA20, 0xC313);
-        MP_WriteMcuAccessRegWord(sc, 0xFA22, 0xE815);
-        MP_WriteMcuAccessRegWord(sc, 0xFA24, 0x4860);
-        MP_WriteMcuAccessRegWord(sc, 0xFA26, 0x8EE0);
-        MP_WriteMcuAccessRegWord(sc, 0xFA28, 0xC210);
-        MP_WriteMcuAccessRegWord(sc, 0xFA2A, 0xC310);
-        MP_WriteMcuAccessRegWord(sc, 0xFA2C, 0xE822);
-        MP_WriteMcuAccessRegWord(sc, 0xFA2E, 0x481E);
-        MP_WriteMcuAccessRegWord(sc, 0xFA30, 0xC20C);
-        MP_WriteMcuAccessRegWord(sc, 0xFA32, 0xC30C);
-        MP_WriteMcuAccessRegWord(sc, 0xFA34, 0xE80C);
-        MP_WriteMcuAccessRegWord(sc, 0xFA36, 0xC206);
-        MP_WriteMcuAccessRegWord(sc, 0xFA38, 0x7358);
-        MP_WriteMcuAccessRegWord(sc, 0xFA3A, 0x483A);
-        MP_WriteMcuAccessRegWord(sc, 0xFA3C, 0x9B58);
-        MP_WriteMcuAccessRegWord(sc, 0xFA3E, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xFA40, 0xE8E0);
-        MP_WriteMcuAccessRegWord(sc, 0xFA42, 0xE000);
-        MP_WriteMcuAccessRegWord(sc, 0xFA44, 0x1008);
-        MP_WriteMcuAccessRegWord(sc, 0xFA46, 0x0F00);
-        MP_WriteMcuAccessRegWord(sc, 0xFA48, 0x800C);
-        MP_WriteMcuAccessRegWord(sc, 0xFA4A, 0x0F00);
-        MP_WriteMcuAccessRegWord(sc, 0xFA4C, 0xB407);
-        MP_WriteMcuAccessRegWord(sc, 0xFA4E, 0xB406);
-        MP_WriteMcuAccessRegWord(sc, 0xFA50, 0xB403);
-        MP_WriteMcuAccessRegWord(sc, 0xFA52, 0xC7F7);
-        MP_WriteMcuAccessRegWord(sc, 0xFA54, 0x98E0);
-        MP_WriteMcuAccessRegWord(sc, 0xFA56, 0x99E2);
-        MP_WriteMcuAccessRegWord(sc, 0xFA58, 0x9AE4);
-        MP_WriteMcuAccessRegWord(sc, 0xFA5A, 0x21B2);
-        MP_WriteMcuAccessRegWord(sc, 0xFA5C, 0x4831);
-        MP_WriteMcuAccessRegWord(sc, 0xFA5E, 0x483F);
-        MP_WriteMcuAccessRegWord(sc, 0xFA60, 0x9BE6);
-        MP_WriteMcuAccessRegWord(sc, 0xFA62, 0x66E7);
-        MP_WriteMcuAccessRegWord(sc, 0xFA64, 0x49E6);
-        MP_WriteMcuAccessRegWord(sc, 0xFA66, 0xF1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xFA68, 0xB003);
-        MP_WriteMcuAccessRegWord(sc, 0xFA6A, 0xB006);
-        MP_WriteMcuAccessRegWord(sc, 0xFA6C, 0xB007);
-        MP_WriteMcuAccessRegWord(sc, 0xFA6E, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xFA70, 0xB407);
-        MP_WriteMcuAccessRegWord(sc, 0xFA72, 0xB406);
-        MP_WriteMcuAccessRegWord(sc, 0xFA74, 0xB403);
-        MP_WriteMcuAccessRegWord(sc, 0xFA76, 0xC7E5);
-        MP_WriteMcuAccessRegWord(sc, 0xFA78, 0x9AE4);
-        MP_WriteMcuAccessRegWord(sc, 0xFA7A, 0x21B2);
-        MP_WriteMcuAccessRegWord(sc, 0xFA7C, 0x4831);
-        MP_WriteMcuAccessRegWord(sc, 0xFA7E, 0x9BE6);
-        MP_WriteMcuAccessRegWord(sc, 0xFA80, 0x66E7);
-        MP_WriteMcuAccessRegWord(sc, 0xFA82, 0x49E6);
-        MP_WriteMcuAccessRegWord(sc, 0xFA84, 0xF1FE);
-        MP_WriteMcuAccessRegWord(sc, 0xFA86, 0x70E0);
-        MP_WriteMcuAccessRegWord(sc, 0xFA88, 0x71E2);
-        MP_WriteMcuAccessRegWord(sc, 0xFA8A, 0xB003);
-        MP_WriteMcuAccessRegWord(sc, 0xFA8C, 0xB006);
-        MP_WriteMcuAccessRegWord(sc, 0xFA8E, 0xB007);
-        MP_WriteMcuAccessRegWord(sc, 0xFA90, 0xFF80);
-        MP_WriteMcuAccessRegWord(sc, 0xFA92, 0x4882);
-        MP_WriteMcuAccessRegWord(sc, 0xFA94, 0xB406);
-        MP_WriteMcuAccessRegWord(sc, 0xFA96, 0xB405);
-        MP_WriteMcuAccessRegWord(sc, 0xFA98, 0xC71E);
-        MP_WriteMcuAccessRegWord(sc, 0xFA9A, 0x76E0);
-        MP_WriteMcuAccessRegWord(sc, 0xFA9C, 0x1D78);
-        MP_WriteMcuAccessRegWord(sc, 0xFA9E, 0x4175);
-        MP_WriteMcuAccessRegWord(sc, 0xFAA0, 0x1630);
-        MP_WriteMcuAccessRegWord(sc, 0xFAA2, 0xF10C);
-        MP_WriteMcuAccessRegWord(sc, 0xFAA4, 0xC715);
-        MP_WriteMcuAccessRegWord(sc, 0xFAA6, 0x76E0);
-        MP_WriteMcuAccessRegWord(sc, 0xFAA8, 0x4861);
-        MP_WriteMcuAccessRegWord(sc, 0xFAAA, 0x9EE0);
-        MP_WriteMcuAccessRegWord(sc, 0xFAAC, 0xC713);
-        MP_WriteMcuAccessRegWord(sc, 0xFAAE, 0x1EFF);
-        MP_WriteMcuAccessRegWord(sc, 0xFAB0, 0x9EE2);
-        MP_WriteMcuAccessRegWord(sc, 0xFAB2, 0x75E0);
-        MP_WriteMcuAccessRegWord(sc, 0xFAB4, 0x4850);
-        MP_WriteMcuAccessRegWord(sc, 0xFAB6, 0x9DE0);
-        MP_WriteMcuAccessRegWord(sc, 0xFAB8, 0xE005);
-        MP_WriteMcuAccessRegWord(sc, 0xFABA, 0xC70B);
-        MP_WriteMcuAccessRegWord(sc, 0xFABC, 0x76E0);
-        MP_WriteMcuAccessRegWord(sc, 0xFABE, 0x4865);
-        MP_WriteMcuAccessRegWord(sc, 0xFAC0, 0x9EE0);
-        MP_WriteMcuAccessRegWord(sc, 0xFAC2, 0xB005);
-        MP_WriteMcuAccessRegWord(sc, 0xFAC4, 0xB006);
-        MP_WriteMcuAccessRegWord(sc, 0xFAC6, 0xC708);
-        MP_WriteMcuAccessRegWord(sc, 0xFAC8, 0xC102);
-        MP_WriteMcuAccessRegWord(sc, 0xFACA, 0xB900);
-        MP_WriteMcuAccessRegWord(sc, 0xFACC, 0x279E);
-        MP_WriteMcuAccessRegWord(sc, 0xFACE, 0xEB16);
-        MP_WriteMcuAccessRegWord(sc, 0xFAD0, 0xEB00);
-        MP_WriteMcuAccessRegWord(sc, 0xFAD2, 0xE43C);
-        MP_WriteMcuAccessRegWord(sc, 0xFAD4, 0xDC00);
-        MP_WriteMcuAccessRegWord(sc, 0xFAD6, 0xD3EC);
-        MP_WriteMcuAccessRegWord(sc, 0xFAD8, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xFADA, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xFADC, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xFADE, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xFAE0, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xFAE2, 0x0000);
-
-        MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
-
-        MP_WriteMcuAccessRegWord(sc, 0xFC28, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xFC2A, 0x04B4);
-        MP_WriteMcuAccessRegWord(sc, 0xFC2C, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xFC2E, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xFC30, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xFC32, 0x279C);
-        MP_WriteMcuAccessRegWord(sc, 0xFC34, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xFC36, 0x0000);
-
-        MP_WriteMcuAccessRegWord(sc, 0xFC38, 0x0022);
-}
-
-static void re_set_mac_mcu_8168fp_3(struct re_softc *sc)
-{
-        DisableMcuBPs(sc);
-
-        MP_WriteMcuAccessRegWord(sc, 0xF800, 0xE008);
-        MP_WriteMcuAccessRegWord(sc, 0xF802, 0xE00A);
-        MP_WriteMcuAccessRegWord(sc, 0xF804, 0xE00F);
-        MP_WriteMcuAccessRegWord(sc, 0xF806, 0xE014);
-        MP_WriteMcuAccessRegWord(sc, 0xF808, 0xE016);
-        MP_WriteMcuAccessRegWord(sc, 0xF80A, 0xE018);
-        MP_WriteMcuAccessRegWord(sc, 0xF80C, 0xE01A);
-        MP_WriteMcuAccessRegWord(sc, 0xF80E, 0xE01C);
-        MP_WriteMcuAccessRegWord(sc, 0xF810, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF812, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF814, 0x2AB2);
-        MP_WriteMcuAccessRegWord(sc, 0xF816, 0x1BC0);
-        MP_WriteMcuAccessRegWord(sc, 0xF818, 0x46EB);
-        MP_WriteMcuAccessRegWord(sc, 0xF81A, 0x1BFE);
-        MP_WriteMcuAccessRegWord(sc, 0xF81C, 0xC102);
-        MP_WriteMcuAccessRegWord(sc, 0xF81E, 0xB900);
-        MP_WriteMcuAccessRegWord(sc, 0xF820, 0x0B1A);
-        MP_WriteMcuAccessRegWord(sc, 0xF822, 0x1BC0);
-        MP_WriteMcuAccessRegWord(sc, 0xF824, 0x46EB);
-        MP_WriteMcuAccessRegWord(sc, 0xF826, 0x1B7E);
-        MP_WriteMcuAccessRegWord(sc, 0xF828, 0xC102);
-        MP_WriteMcuAccessRegWord(sc, 0xF82A, 0xB900);
-        MP_WriteMcuAccessRegWord(sc, 0xF82C, 0x0BEA);
-        MP_WriteMcuAccessRegWord(sc, 0xF82E, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF830, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF832, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF834, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF836, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF838, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF83A, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF83C, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF83E, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF840, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF842, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF844, 0x0000);
-        MP_WriteMcuAccessRegWord(sc, 0xF846, 0xC602);
-        MP_WriteMcuAccessRegWord(sc, 0xF848, 0xBE00);
-        MP_WriteMcuAccessRegWord(sc, 0xF84A, 0x0000);
+        re_write_mac_mcu_ram_code(sc, mcu_patch_code_8168fp_2, ARRAY_SIZE(mcu_patch_code_8168fp_2));
 
         MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
 
@@ -3199,11 +1653,83 @@ static void re_set_mac_mcu_8168fp_3(struct re_softc *sc)
         MP_WriteMcuAccessRegWord(sc, 0xFC2A, 0x0B14);
         MP_WriteMcuAccessRegWord(sc, 0xFC2C, 0x0BE4);
 
-        if (sc->hw_hw_supp_serdes_phy_ver == 1) {
-                MP_WriteMcuAccessRegWord(sc, 0xFC38, 0x0007);
-        } else {
+        MP_WriteMcuAccessRegWord(sc, 0xFC38, 0x0007);
+}
+
+static void _re_set_mac_mcu_8168fp_2(struct re_softc *sc)
+{
+        static const uint16_t mcu_patch_code_8168fp_2[] = {
+                0xE008, 0xE00A, 0xE00F, 0xE014, 0xE05F, 0xE064, 0xE066, 0xE068, 0xC602,
+                0xBE00, 0x0000, 0x1BC0, 0x46EB, 0x1BFE, 0xC102, 0xB900, 0x0B1A, 0x1BC0,
+                0x46EB, 0x1B7E, 0xC102, 0xB900, 0x0BEA, 0xB400, 0xB401, 0xB402, 0xB403,
+                0xB404, 0xB405, 0xC03A, 0x7206, 0x49AE, 0xF1FE, 0xC137, 0x9904, 0xC136,
+                0x9906, 0x7206, 0x49AE, 0xF1FE, 0x7200, 0x49A0, 0xF10B, 0xC52F, 0xC12E,
+                0xC232, 0xC332, 0xE812, 0xC331, 0xE810, 0xC330, 0xE80E, 0xE018, 0xC126,
+                0xC229, 0xC525, 0xC328, 0xE808, 0xC523, 0xC326, 0xE805, 0xC521, 0xC324,
+                0xE802, 0xE00C, 0x740E, 0x49CE, 0xF1FE, 0x9908, 0x9D0A, 0x9A0C, 0x9B0E,
+                0x740E, 0x49CE, 0xF1FE, 0xFF80, 0xB005, 0xB004, 0xB003, 0xB002, 0xB001,
+                0xB000, 0xC604, 0xC002, 0xB800, 0x2A5E, 0xE000, 0xE8E0, 0xF128, 0x3DC2,
+                0xFFFF, 0x10EC, 0x816A, 0x816D, 0x816C, 0xF000, 0x8002, 0x8004, 0x8007,
+                0x48C1, 0x48C2, 0x9C46, 0xC402, 0xBC00, 0x07BC, 0xC602, 0xBE00, 0x0000,
+                0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000
+        };
+
+        DisableMcuBPs(sc);
+
+        re_write_mac_mcu_ram_code(sc, mcu_patch_code_8168fp_2, ARRAY_SIZE(mcu_patch_code_8168fp_2));
+
+        MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
+
+        MP_WriteMcuAccessRegWord(sc, 0xFC28, 0x2AAC);
+        MP_WriteMcuAccessRegWord(sc, 0xFC2A, 0x0B14);
+        MP_WriteMcuAccessRegWord(sc, 0xFC2C, 0x0BE4);
+        MP_WriteMcuAccessRegWord(sc, 0xFC2E, 0x2A5C);
+        //MP_WriteMcuAccessRegWord(sc, 0xFC30, 0x07B0);
+
+        if (true == re_check_dash_other_fun_present(sc))
                 MP_WriteMcuAccessRegWord(sc, 0xFC38, 0x0006);
-        }
+        else
+                MP_WriteMcuAccessRegWord(sc, 0xFC38, 0x000E);
+}
+
+static void re_set_mac_mcu_8168fp_2(struct re_softc *sc)
+{
+        if (sc->hw_hw_supp_serdes_phy_ver == 1)
+                re_set_mac_mcu_8168fp_8116as_2(sc);
+        else
+                _re_set_mac_mcu_8168fp_2(sc);
+}
+
+static void re_set_mac_mcu_8168fp_3(struct re_softc *sc)
+{
+        static const uint16_t mcu_patch_code_8168fp_3[] = {
+                0xE008, 0xE053, 0xE058, 0xE05A, 0xE05C, 0xE05E, 0xE060, 0xE062, 0xB400,
+                0xB401, 0xB402, 0xB403, 0xB404, 0xB405, 0xC03A, 0x7206, 0x49AE, 0xF1FE,
+                0xC137, 0x9904, 0xC136, 0x9906, 0x7206, 0x49AE, 0xF1FE, 0x7200, 0x49A0,
+                0xF10B, 0xC52F, 0xC12E, 0xC232, 0xC332, 0xE812, 0xC331, 0xE810, 0xC330,
+                0xE80E, 0xE018, 0xC126, 0xC229, 0xC525, 0xC328, 0xE808, 0xC523, 0xC326,
+                0xE805, 0xC521, 0xC324, 0xE802, 0xE00C, 0x740E, 0x49CE, 0xF1FE, 0x9908,
+                0x9D0A, 0x9A0C, 0x9B0E, 0x740E, 0x49CE, 0xF1FE, 0xFF80, 0xB005, 0xB004,
+                0xB003, 0xB002, 0xB001, 0xB000, 0xC604, 0xC002, 0xB800, 0x2B16, 0xE000,
+                0xE8E0, 0xF128, 0x3DC2, 0xFFFF, 0x10EC, 0x816A, 0x816D, 0x816C, 0xF000,
+                0x8002, 0x8004, 0x8007, 0x48C1, 0x48C2, 0x9C46, 0xC402, 0xBC00, 0x07BC,
+                0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000,
+                0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000
+        };
+
+        DisableMcuBPs(sc);
+
+        re_write_mac_mcu_ram_code(sc, mcu_patch_code_8168fp_3, ARRAY_SIZE(mcu_patch_code_8168fp_3));
+
+        MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
+
+        MP_WriteMcuAccessRegWord(sc, 0xFC28, 0x2B14);
+        //MP_WriteMcuAccessRegWord(sc, 0xFC2A, 0x07B0);
+
+        if (true == re_check_dash_other_fun_present(sc))
+                MP_WriteMcuAccessRegWord(sc, 0xFC38, 0x0000);
+        else
+                MP_WriteMcuAccessRegWord(sc, 0xFC38, 0x0001);
 }
 
 static void re_set_mac_mcu_8168fp_4(struct re_softc *sc)
@@ -3218,49 +1744,110 @@ static void re_set_mac_mcu_8125a_1(struct re_softc *sc)
 
 static void re_set_mac_mcu_8125a_2(struct re_softc *sc)
 {
-        u_int16_t i;
         static const u_int16_t mcu_patch_code_8125a_2[] =  {
-                0xE008, 0xE01E, 0xE02E, 0xE054, 0xE057, 0xE059, 0xE0C2, 0xE0CB, 0x9996,
-                0x49D1, 0xF005, 0x49D4, 0xF10A, 0x49D8, 0xF108, 0xC00F, 0x7100, 0x209C,
-                0x249C, 0xC009, 0x9900, 0xE004, 0xC006, 0x1900, 0x9900, 0xC602, 0xBE00,
-                0x5A48, 0xE0C2, 0x0004, 0xE10A, 0xC60F, 0x73C4, 0x49B3, 0xF106, 0x73C2,
-                0xC608, 0xB406, 0xC609, 0xFF80, 0xC605, 0xB406, 0xC605, 0xFF80, 0x0544,
-                0x0568, 0xE906, 0xCDE8, 0xC724, 0xC624, 0x9EE2, 0x1E01, 0x9EE0, 0x76E0,
-                0x49E0, 0xF1FE, 0x76E6, 0x486D, 0x4868, 0x9EE4, 0x1E03, 0x9EE0, 0x76E0,
-                0x49E0, 0xF1FE, 0xC615, 0x9EE2, 0x1E01, 0x9EE0, 0x76E0, 0x49E0, 0xF1FE,
-                0x76E6, 0x486F, 0x9EE4, 0x1E03, 0x9EE0, 0x76E0, 0x49E0, 0xF1FE, 0x7196,
-                0xC702, 0xBF00, 0x5A44, 0xEB0E, 0x0070, 0x00C3, 0x1BC0, 0xC602, 0xBE00,
-                0x0E26, 0xC602, 0xBE00, 0x0EBA, 0x1501, 0xF02A, 0x1500, 0xF15D, 0xC661,
-                0x75C8, 0x49D5, 0xF00A, 0x49D6, 0xF008, 0x49D7, 0xF006, 0x49D8, 0xF004,
-                0x75D2, 0x49D9, 0xF150, 0xC553, 0x77A0, 0x75C8, 0x4855, 0x4856, 0x4857,
-                0x4858, 0x48DA, 0x48DB, 0x49FE, 0xF002, 0x485A, 0x49FF, 0xF002, 0x485B,
-                0x9DC8, 0x75D2, 0x4859, 0x9DD2, 0xC643, 0x75C0, 0x49D4, 0xF033, 0x49D0,
-                0xF137, 0xE030, 0xC63A, 0x75C8, 0x49D5, 0xF00E, 0x49D6, 0xF00C, 0x49D7,
-                0xF00A, 0x49D8, 0xF008, 0x75D2, 0x49D9, 0xF005, 0xC62E, 0x75C0, 0x49D7,
-                0xF125, 0xC528, 0x77A0, 0xC627, 0x75C8, 0x4855, 0x4856, 0x4857, 0x4858,
+                0xE010, 0xE012, 0xE022, 0xE024, 0xE029, 0xE02B, 0xE094, 0xE09D, 0xE09F,
+                0xE0AA, 0xE0B5, 0xE0C6, 0xE0CC, 0xE0D1, 0xE0D6, 0xE0D8, 0xC602, 0xBE00,
+                0x0000, 0xC60F, 0x73C4, 0x49B3, 0xF106, 0x73C2, 0xC608, 0xB406, 0xC609,
+                0xFF80, 0xC605, 0xB406, 0xC605, 0xFF80, 0x0544, 0x0568, 0xE906, 0xCDE8,
+                0xC602, 0xBE00, 0x0000, 0x48C1, 0x48C2, 0x9C46, 0xC402, 0xBC00, 0x0A12,
+                0xC602, 0xBE00, 0x0EBA, 0x1501, 0xF02A, 0x1500, 0xF15D, 0xC661, 0x75C8,
+                0x49D5, 0xF00A, 0x49D6, 0xF008, 0x49D7, 0xF006, 0x49D8, 0xF004, 0x75D2,
+                0x49D9, 0xF150, 0xC553, 0x77A0, 0x75C8, 0x4855, 0x4856, 0x4857, 0x4858,
                 0x48DA, 0x48DB, 0x49FE, 0xF002, 0x485A, 0x49FF, 0xF002, 0x485B, 0x9DC8,
-                0x75D2, 0x4859, 0x9DD2, 0xC616, 0x75C0, 0x4857, 0x9DC0, 0xC613, 0x75C0,
-                0x49DA, 0xF003, 0x49D0, 0xF107, 0xC60B, 0xC50E, 0x48D9, 0x9DC0, 0x4859,
-                0x9DC0, 0xC608, 0xC702, 0xBF00, 0x3AE0, 0xE860, 0xB400, 0xB5D4, 0xE908,
-                0xE86C, 0x1200, 0xC409, 0x6780, 0x48F1, 0x8F80, 0xC404, 0xC602, 0xBE00,
-                0x10AA, 0xC010, 0xEA7C, 0xC602, 0xBE00, 0x0000
+                0x75D2, 0x4859, 0x9DD2, 0xC643, 0x75C0, 0x49D4, 0xF033, 0x49D0, 0xF137,
+                0xE030, 0xC63A, 0x75C8, 0x49D5, 0xF00E, 0x49D6, 0xF00C, 0x49D7, 0xF00A,
+                0x49D8, 0xF008, 0x75D2, 0x49D9, 0xF005, 0xC62E, 0x75C0, 0x49D7, 0xF125,
+                0xC528, 0x77A0, 0xC627, 0x75C8, 0x4855, 0x4856, 0x4857, 0x4858, 0x48DA,
+                0x48DB, 0x49FE, 0xF002, 0x485A, 0x49FF, 0xF002, 0x485B, 0x9DC8, 0x75D2,
+                0x4859, 0x9DD2, 0xC616, 0x75C0, 0x4857, 0x9DC0, 0xC613, 0x75C0, 0x49DA,
+                0xF003, 0x49D0, 0xF107, 0xC60B, 0xC50E, 0x48D9, 0x9DC0, 0x4859, 0x9DC0,
+                0xC608, 0xC702, 0xBF00, 0x3AE0, 0xE860, 0xB400, 0xB5D4, 0xE908, 0xE86C,
+                0x1200, 0xC409, 0x6780, 0x48F1, 0x8F80, 0xC404, 0xC602, 0xBE00, 0x10AA,
+                0xC010, 0xEA7C, 0xC602, 0xBE00, 0x0000, 0x740A, 0x4846, 0x4847, 0x9C0A,
+                0xC607, 0x74C0, 0x48C6, 0x9CC0, 0xC602, 0xBE00, 0x13FE, 0xE054, 0x72CA,
+                0x4826, 0x4827, 0x9ACA, 0xC607, 0x72C0, 0x48A6, 0x9AC0, 0xC602, 0xBE00,
+                0x07DC, 0xE054, 0xC60F, 0x74C4, 0x49CC, 0xF109, 0xC60C, 0x74CA, 0x48C7,
+                0x9CCA, 0xC609, 0x74C0, 0x4846, 0x9CC0, 0xC602, 0xBE00, 0x2480, 0xE092,
+                0xE0C0, 0xE054, 0x7420, 0x48C0, 0x9C20, 0x7444, 0xC602, 0xBE00, 0x12F8,
+                0x1BFF, 0x46EB, 0x1BFF, 0xC102, 0xB900, 0x0D5A, 0x1BFF, 0x46EB, 0x1BFF,
+                0xC102, 0xB900, 0x0E2A, 0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6486,
+                0x0B15, 0x090E, 0x1139
         };
 
         DisableMcuBPs(sc);
 
-        for (i = 0; i < ARRAY_SIZE(mcu_patch_code_8125a_2); i++) {
-                MP_WriteMcuAccessRegWord(sc, 0xF800 + i * 2, mcu_patch_code_8125a_2[i]);
-        }
+        re_write_mac_mcu_ram_code(sc, mcu_patch_code_8125a_2, ARRAY_SIZE(mcu_patch_code_8125a_2));
 
         MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
 
         MP_WriteMcuAccessRegWord(sc, 0xFC2A, 0x0540);
-        MP_WriteMcuAccessRegWord(sc, 0xFC2E, 0x0E24);
+        MP_WriteMcuAccessRegWord(sc, 0xFC2E, 0x0A06);
         MP_WriteMcuAccessRegWord(sc, 0xFC30, 0x0EB8);
         MP_WriteMcuAccessRegWord(sc, 0xFC32, 0x3A5C);
         MP_WriteMcuAccessRegWord(sc, 0xFC34, 0x10A8);
+        MP_WriteMcuAccessRegWord(sc, 0xFC40, 0x0D54);
+        MP_WriteMcuAccessRegWord(sc, 0xFC42, 0x0E24);
 
-        MP_WriteMcuAccessRegWord(sc, 0xFC48, 0x007A);
+        MP_WriteMcuAccessRegWord(sc, 0xFC48, 0x307A);
 }
 
 static void re_set_mac_mcu_8125b_1(struct re_softc *sc)
@@ -3270,26 +1857,27 @@ static void re_set_mac_mcu_8125b_1(struct re_softc *sc)
 
 static void re_set_mac_mcu_8125b_2(struct re_softc *sc)
 {
-        u_int16_t i;
-        static const u_int16_t mcu_patch_code_8125b_2[] =   {
-                0xE008, 0xE013, 0xE01E, 0xE02F, 0xE035, 0xE04F, 0xE053, 0xE055, 0x740A,
-                0x4846, 0x4847, 0x9C0A, 0xC607, 0x74C0, 0x48C6, 0x9CC0, 0xC602, 0xBE00,
-                0x13F0, 0xE054, 0x72CA, 0x4826, 0x4827, 0x9ACA, 0xC607, 0x72C0, 0x48A6,
-                0x9AC0, 0xC602, 0xBE00, 0x081C, 0xE054, 0xC60F, 0x74C4, 0x49CC, 0xF109,
-                0xC60C, 0x74CA, 0x48C7, 0x9CCA, 0xC609, 0x74C0, 0x4846, 0x9CC0, 0xC602,
-                0xBE00, 0x2494, 0xE092, 0xE0C0, 0xE054, 0x7420, 0x48C0, 0x9C20, 0x7444,
-                0xC602, 0xBE00, 0x12DC, 0x733A, 0x21B5, 0x25BC, 0x1304, 0xF111, 0x1B12,
-                0x1D2A, 0x3168, 0x3ADA, 0x31AB, 0x1A00, 0x9AC0, 0x1300, 0xF1FB, 0x7620,
-                0x236E, 0x276F, 0x1A3C, 0x22A1, 0x41B5, 0x9EE2, 0x76E4, 0x486F, 0x9EE4,
-                0xC602, 0xBE00, 0x4A26, 0x733A, 0x49BB, 0xC602, 0xBE00, 0x47A2, 0xC602,
-                0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000
+        static const u_int16_t mcu_patch_code_8125b_2[] =  {
+                0xE010, 0xE01B, 0xE026, 0xE037, 0xE03D, 0xE057, 0xE05B, 0xE060, 0xE062,
+                0xE064, 0xE066, 0xE068, 0xE06A, 0xE06C, 0xE06E, 0xE070, 0x740A, 0x4846,
+                0x4847, 0x9C0A, 0xC607, 0x74C0, 0x48C6, 0x9CC0, 0xC602, 0xBE00, 0x13F0,
+                0xE054, 0x72CA, 0x4826, 0x4827, 0x9ACA, 0xC607, 0x72C0, 0x48A6, 0x9AC0,
+                0xC602, 0xBE00, 0x081C, 0xE054, 0xC60F, 0x74C4, 0x49CC, 0xF109, 0xC60C,
+                0x74CA, 0x48C7, 0x9CCA, 0xC609, 0x74C0, 0x4846, 0x9CC0, 0xC602, 0xBE00,
+                0x2494, 0xE092, 0xE0C0, 0xE054, 0x7420, 0x48C0, 0x9C20, 0x7444, 0xC602,
+                0xBE00, 0x12DC, 0x733A, 0x21B5, 0x25BC, 0x1304, 0xF111, 0x1B12, 0x1D2A,
+                0x3168, 0x3ADA, 0x31AB, 0x1A00, 0x9AC0, 0x1300, 0xF1FB, 0x7620, 0x236E,
+                0x276F, 0x1A3C, 0x22A1, 0x41B5, 0x9EE2, 0x76E4, 0x486F, 0x9EE4, 0xC602,
+                0xBE00, 0x4A26, 0x733A, 0x49BB, 0xC602, 0xBE00, 0x47A2, 0x48C1, 0x48C2,
+                0x9C46, 0xC402, 0xBC00, 0x0A52, 0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00,
+                0x0000, 0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00,
+                0x0000, 0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00, 0x0000, 0xC602, 0xBE00,
+                0x0000, 0xC602, 0xBE00, 0x0000
         };
 
         DisableMcuBPs(sc);
 
-        for (i = 0; i < ARRAY_SIZE(mcu_patch_code_8125b_2); i++) {
-                MP_WriteMcuAccessRegWord(sc, 0xF800 + i * 2, mcu_patch_code_8125b_2[i]);
-        }
+        re_write_mac_mcu_ram_code(sc, mcu_patch_code_8125b_2, ARRAY_SIZE(mcu_patch_code_8125b_2));
 
         MP_WriteMcuAccessRegWord(sc, 0xFC26, 0x8000);
 
@@ -3299,6 +1887,7 @@ static void re_set_mac_mcu_8125b_2(struct re_softc *sc)
         MP_WriteMcuAccessRegWord(sc, 0xFC2E, 0x12DA);
         MP_WriteMcuAccessRegWord(sc, 0xFC30, 0x4A20);
         MP_WriteMcuAccessRegWord(sc, 0xFC32, 0x47A0);
+        //MP_WriteMcuAccessRegWord(sc, 0xFC34, 0x0A46);
 
         MP_WriteMcuAccessRegWord(sc, 0xFC48, 0x003F);
 }
@@ -3325,20 +1914,25 @@ static void re_hw_mac_mcu_config(struct re_softc *sc)
                 re_set_mac_mcu_8168ep_2(sc);
                 break;
         case MACFG_68:
-        case MACFG_69:
                 re_set_mac_mcu_8168h_1(sc);
                 break;
+        case MACFG_69:
+                re_set_mac_mcu_8168h_2(sc);
+                break;
         case MACFG_70:
-                if (sc->HwPkgDet == 0x00 || sc->HwPkgDet == 0x0F)
-                        re_set_mac_mcu_8168fp_1(sc);
-                else if (sc->HwPkgDet == 0x06)
-                        re_set_mac_mcu_8168fp_2(sc);
+                re_set_mac_mcu_8168fp_1(sc);
                 break;
         case MACFG_71:
-                re_set_mac_mcu_8168fp_3(sc);
+                re_set_mac_mcu_8168fp_2(sc);
                 break;
         case MACFG_72:
+                re_set_mac_mcu_8168fp_3(sc);
+                break;
+        case MACFG_73:
                 re_set_mac_mcu_8168fp_4(sc);
+                break;
+        case MACFG_74:
+                re_set_mac_mcu_8168h_3(sc);
                 break;
         case MACFG_80:
                 re_set_mac_mcu_8125a_1(sc);
@@ -3431,8 +2025,7 @@ is_valid_ether_addr(const u_int8_t * addr)
 static inline void
 random_ether_addr(u_int8_t * dst)
 {
-        if (read_random(dst, 6) == 0)
-                arc4rand(dst, 6, 0);
+        arc4rand(dst, 6, 0);
 
         dst[0] &= 0xfe;
         dst[0] |= 0x02;
@@ -3502,6 +2095,9 @@ static void re_exit_oob(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_80:
+        case MACFG_81:
                 Dash2DisableTxRx(sc);
                 break;
         }
@@ -3523,6 +2119,8 @@ static void re_exit_oob(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
                 CSR_WRITE_1(sc, 0xF2, CSR_READ_1(sc, 0xF2) | BIT_3);
                 DELAY(2000);
 
@@ -3541,13 +2139,10 @@ static void re_exit_oob(struct re_softc *sc)
                         DELAY(50);
                         if ((CSR_READ_1(sc, RE_MCU_CMD) & (RE_TXFIFO_EMPTY | RE_RXFIFO_EMPTY)) == (RE_TXFIFO_EMPTY | RE_RXFIFO_EMPTY))
                                 break;
-
                 }
                 break;
         case MACFG_80:
         case MACFG_81:
-        case MACFG_82:
-        case MACFG_83:
                 CSR_WRITE_1(sc, 0xF2, CSR_READ_1(sc, 0xF2) | BIT_3);
                 DELAY(2000);
 
@@ -3560,16 +2155,30 @@ static void re_exit_oob(struct re_softc *sc)
                         DELAY(50);
                         if ((CSR_READ_1(sc, RE_MCU_CMD) & (RE_TXFIFO_EMPTY | RE_RXFIFO_EMPTY)) == (RE_TXFIFO_EMPTY | RE_RXFIFO_EMPTY))
                                 break;
+                }
+                break;
+        case MACFG_82:
+        case MACFG_83:
+                CSR_WRITE_1(sc, 0xF2, CSR_READ_1(sc, 0xF2) | BIT_3);
+                DELAY(2000);
 
+                if (CSR_READ_1(sc, RE_COMMAND) & (RE_CMD_TX_ENB | RE_CMD_RX_ENB)) {
+                        DELAY(100);
+                        CSR_WRITE_1(sc, RE_COMMAND, CSR_READ_1(sc, RE_COMMAND) & ~(RE_CMD_TX_ENB | RE_CMD_RX_ENB));
                 }
 
-                if (sc->re_type == MACFG_82 || sc->re_type == MACFG_83) {
-                        for (i = 0; i < 3000; i++) {
-                                DELAY(50);
-                                if ((CSR_READ_2(sc, RE_IntrMitigate) & (BIT_0 | BIT_1 | BIT_8)) == (BIT_0 | BIT_1 | BIT_8))
-                                        break;
+                CSR_WRITE_1(sc, RE_COMMAND, CSR_READ_1(sc, RE_COMMAND) | RE_CMD_STOP_REQ);
 
-                        }
+                for (i = 0; i < 3000; i++) {
+                        DELAY(50);
+                        if ((CSR_READ_1(sc, RE_MCU_CMD) & (RE_TXFIFO_EMPTY | RE_RXFIFO_EMPTY)) == (RE_TXFIFO_EMPTY | RE_RXFIFO_EMPTY))
+                                break;
+                }
+
+                for (i = 0; i < 3000; i++) {
+                        DELAY(50);
+                        if ((CSR_READ_2(sc, RE_IntrMitigate) & (BIT_0 | BIT_1 | BIT_8)) == (BIT_0 | BIT_1 | BIT_8))
+                                break;
                 }
                 break;
         }
@@ -3633,6 +2242,8 @@ static void re_exit_oob(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
                 data16 = MP_ReadMcuAccessRegWord(sc, 0xE8DE) & ~BIT_14;
                 MP_WriteMcuAccessRegWord(sc, 0xE8DE, data16);
                 for (i = 0; i < 10; i++) {
@@ -3681,6 +2292,8 @@ static void re_exit_oob(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
         case MACFG_80:
         case MACFG_81:
         case MACFG_82:
@@ -3782,6 +2395,8 @@ static void re_hw_init(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
         case MACFG_80:
         case MACFG_81:
         case MACFG_82:
@@ -3865,6 +2480,8 @@ static void re_get_hw_mac_address(struct re_softc *sc, u_int8_t *eaddr)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
                 *(u_int32_t *)&eaddr[0] = re_eri_read(sc, 0xE0, 4, ERIAR_ExGMAC);
                 *(u_int16_t *)&eaddr[4] = (u_int16_t)re_eri_read(sc, 0xE4, 4, ERIAR_ExGMAC);
                 break;
@@ -4209,6 +2826,8 @@ static int re_check_mac_version(struct re_softc *sc)
                 break;
         case 0x54100000:
                 sc->re_type = MACFG_69;
+                if ((MP_ReadMcuAccessRegWord(sc, 0xD006) & 0xFF00) == 0x0100)
+                        sc->re_type = MACFG_74;
                 sc->max_jumbo_frame_size = Jumbo_Frame_9k;
                 sc->re_if_flags |= RL_FLAG_DESCV2 | RL_FLAG_PHYWAKE_PM | RL_FLAG_MAGIC_PACKET_V2;
                 CSR_WRITE_4(sc, RE_RXCFG, 0xCF00);
@@ -4231,6 +2850,12 @@ static int re_check_mac_version(struct re_softc *sc)
                 sc->re_if_flags |= RL_FLAG_DESCV2 | RL_FLAG_PHYWAKE_PM | RL_FLAG_MAGIC_PACKET_V2;
                 CSR_WRITE_4(sc, RE_RXCFG, 0xCF00);
                 break;
+        case 0x54C00000:
+                sc->re_type = MACFG_73;
+                sc->max_jumbo_frame_size = Jumbo_Frame_9k;
+                sc->re_if_flags |= RL_FLAG_DESCV2 | RL_FLAG_PHYWAKE_PM | RL_FLAG_MAGIC_PACKET_V2;
+                CSR_WRITE_4(sc, RE_RXCFG, 0xCF00);
+                break;
         case 0x60800000:
                 sc->re_type = MACFG_80;
                 sc->max_jumbo_frame_size = Jumbo_Frame_9k;
@@ -4247,13 +2872,13 @@ static int re_check_mac_version(struct re_softc *sc)
                 sc->re_type = MACFG_82;
                 sc->max_jumbo_frame_size = Jumbo_Frame_9k;
                 sc->re_if_flags |= RL_FLAG_DESCV2 | RL_FLAG_PHYWAKE_PM | RL_FLAG_MAGIC_PACKET_V3;
-                CSR_WRITE_4(sc, RE_RXCFG, 0x40C00000);
+                CSR_WRITE_4(sc, RE_RXCFG, 0x40C00800);
                 break;
         case 0x64100000:
                 sc->re_type = MACFG_83;
                 sc->max_jumbo_frame_size = Jumbo_Frame_9k;
                 sc->re_if_flags |= RL_FLAG_DESCV2 | RL_FLAG_PHYWAKE_PM | RL_FLAG_MAGIC_PACKET_V3;
-                CSR_WRITE_4(sc, RE_RXCFG, 0x40C00000);
+                CSR_WRITE_4(sc, RE_RXCFG, 0x40C00800);
                 break;
         default:
                 device_printf(dev,"unknown device\n");
@@ -4267,6 +2892,7 @@ static int re_check_mac_version(struct re_softc *sc)
         case RT_DEVICEID_8169SC:
         case RT_DEVICEID_8168:
         case RT_DEVICEID_8161:
+        case RT_DEVICEID_8162:
         case RT_DEVICEID_8125:
                 //do nothing
                 break;
@@ -4283,6 +2909,7 @@ static void re_init_software_variable(struct re_softc *sc)
         switch(sc->re_device_id) {
         case RT_DEVICEID_8168:
         case RT_DEVICEID_8161:
+        case RT_DEVICEID_8162:
         case RT_DEVICEID_8136:
         case RT_DEVICEID_8125:
                 sc->re_if_flags |= RL_FLAG_PCIE;
@@ -4311,8 +2938,17 @@ static void re_init_software_variable(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
                 sc->HwSuppDashVer = 3;
                 break;
+        case MACFG_80:
+        case MACFG_81: {
+                u_int8_t tmpUchar;
+                tmpUchar = (u_int8_t)MP_ReadMcuAccessRegWord(sc, 0xD006);
+                if (tmpUchar == 0x02 || tmpUchar == 0x04)
+                        sc->HwSuppDashVer = 2;
+        }
+        break;
         default:
                 sc->HwSuppDashVer = 0;
                 break;
@@ -4322,6 +2958,7 @@ static void re_init_software_variable(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
                 sc->HwPkgDet = MP_ReadMcuAccessRegWord(sc, 0xDC00);
                 sc->HwPkgDet = (sc->HwPkgDet >> 3) & 0x0F;
                 break;
@@ -4330,6 +2967,7 @@ static void re_init_software_variable(struct re_softc *sc)
         switch(sc->re_type) {
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
                 if (sc->HwPkgDet == 0x06) {
                         u_int8_t tmpUchar = re_eri_read(sc, 0xE6, 1, ERIAR_ExGMAC);
                         if (tmpUchar == 0x02)
@@ -4378,6 +3016,7 @@ static void re_init_software_variable(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
                 sc->re_cmac_handle = sc->re_mapped_cmac_handle;
                 sc->re_cmac_tag = sc->re_mapped_cmac_tag;
                 break;
@@ -4427,6 +3066,8 @@ static void re_init_software_variable(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
                 sc->re_efuse_ver = EFUSE_SUPPORT_V3;
                 break;
         case MACFG_80:
@@ -4476,7 +3117,8 @@ static void re_init_software_variable(struct re_softc *sc)
         case MACFG_69:
         case MACFG_70:
         case MACFG_71:
-        case MACFG_72: {
+        case MACFG_72:
+        case MACFG_73: {
                 u_int16_t rg_saw_cnt;
 
                 MP_WritePhyUshort(sc, 0x1F, 0x0C42);
@@ -4497,6 +3139,12 @@ static void re_init_software_variable(struct re_softc *sc)
 #ifdef ENABLE_FIBER_SUPPORT
         re_check_hw_fiber_mode_support(sc);
 #endif //ENABLE_FIBER_SUPPORT
+
+        switch (sc->re_type) {
+        case MACFG_74:
+                sc->RequiredSecLanDonglePatch = FALSE;
+                break;
+        }
 
         switch(sc->re_type) {
         case MACFG_31:
@@ -4531,6 +3179,8 @@ static void re_init_software_variable(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
         case MACFG_80:
         case MACFG_81:
         case MACFG_82:
@@ -4590,6 +3240,8 @@ static void re_init_software_variable(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
         case MACFG_80:
         case MACFG_81:
         case MACFG_82:
@@ -4637,7 +3289,11 @@ static void re_init_software_variable(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
                 sc->re_sw_ram_code_ver = NIC_RAMCODE_VERSION_8168FP;
+                break;
+        case MACFG_74:
+                sc->re_sw_ram_code_ver = NIC_RAMCODE_VERSION_8168H_6838;
                 break;
         case MACFG_80:
                 sc->re_sw_ram_code_ver = NIC_RAMCODE_VERSION_8125A_REV_A;
@@ -4660,6 +3316,46 @@ static void re_init_software_variable(struct re_softc *sc)
                    ) {
                         sc->RequirePhyMdiSwapPatch = TRUE;
                 }
+                break;
+        }
+
+        switch (sc->re_type) {
+        case MACFG_38:
+        case MACFG_39:
+        case MACFG_50:
+        case MACFG_51:
+        case MACFG_52:
+        case MACFG_56:
+        case MACFG_57:
+        case MACFG_58:
+        case MACFG_59:
+        case MACFG_60:
+        case MACFG_61:
+        case MACFG_62:
+        case MACFG_67:
+        case MACFG_68:
+        case MACFG_69:
+        case MACFG_70:
+        case MACFG_71:
+        case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
+                sc->HwSuppMacMcuVer = 1;
+                break;
+        case MACFG_80:
+        case MACFG_81:
+        case MACFG_82:
+        case MACFG_83:
+                sc->HwSuppMacMcuVer = 2;
+                break;
+        }
+
+        switch (sc->re_type) {
+        case MACFG_80:
+        case MACFG_81:
+        case MACFG_82:
+        case MACFG_83:
+                sc->MacMcuPageSize = RTL8125_MAC_MCU_PAGE_SIZE;
                 break;
         }
 
@@ -4691,7 +3387,8 @@ static void re_enable_ocp_phy_power_saving(struct re_softc *sc)
             sc->re_type == MACFG_62 || sc->re_type == MACFG_67 ||
             sc->re_type == MACFG_68 || sc->re_type == MACFG_69 ||
             sc->re_type == MACFG_70 || sc->re_type == MACFG_71 ||
-            sc->re_type == MACFG_72) {
+            sc->re_type == MACFG_72 || sc->re_type == MACFG_73 ||
+            sc->re_type == MACFG_74) {
                 val = MP_ReadPhyOcpRegWord(sc, 0x0C41, 0x13);
                 if (val != 0x0050) {
                         re_set_phy_mcu_patch_request(sc);
@@ -4719,7 +3416,8 @@ static void re_disable_ocp_phy_power_saving(struct re_softc *sc)
             sc->re_type == MACFG_62 || sc->re_type == MACFG_67 ||
             sc->re_type == MACFG_68 || sc->re_type == MACFG_69 ||
             sc->re_type == MACFG_70 || sc->re_type == MACFG_71 ||
-            sc->re_type == MACFG_72) {
+            sc->re_type == MACFG_72 || sc->re_type == MACFG_73 ||
+            sc->re_type == MACFG_74) {
                 val = MP_ReadPhyOcpRegWord(sc, 0x0C41, 0x13);
                 if (val != 0x0500) {
                         re_set_phy_mcu_patch_request(sc);
@@ -4751,6 +3449,8 @@ static void re_hw_d3_para(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
         case MACFG_80:
         case MACFG_81:
         case MACFG_82:
@@ -4808,7 +3508,8 @@ static int re_attach(device_t dev)
                 sc->re_res_type = SYS_RES_MEMORY;
                 /* PCIE NIC use different BARs. */
                 if (sc->re_device_id == RT_DEVICEID_8168 || sc->re_device_id == RT_DEVICEID_8161 ||
-                    sc->re_device_id == RT_DEVICEID_8136 || sc->re_device_id == RT_DEVICEID_8125)
+                    sc->re_device_id == RT_DEVICEID_8161 || sc->re_device_id == RT_DEVICEID_8136 ||
+                    sc->re_device_id == RT_DEVICEID_8125)
                         sc->re_res_id = PCIR_BAR(2);
         } else {
                 sc->re_res_id = PCIR_BAR(0);
@@ -5136,6 +3837,7 @@ static int re_attach(device_t dev)
         case RT_DEVICEID_8169SC:
         case RT_DEVICEID_8168:
         case RT_DEVICEID_8161:
+        case RT_DEVICEID_8162:
                 ifp->if_baudrate = 1000000000;
                 break;
         default:
@@ -5207,6 +3909,7 @@ static int re_attach(device_t dev)
         case RT_DEVICEID_8169SC:
         case RT_DEVICEID_8168:
         case RT_DEVICEID_8161:
+        case RT_DEVICEID_8162:
                 ifmedia_add(&sc->media, IFM_ETHER | IFM_1000_T | IFM_FDX, 0, NULL);
                 //ifmedia_add(&sc->media, IFM_ETHER | IFM_1000_T, 0, NULL);
                 break;
@@ -5562,6 +4265,8 @@ static void re_hw_start_unlock(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
                 CSR_WRITE_1(sc, RE_CFG5, CSR_READ_1(sc, RE_CFG5) & ~BIT_0);
                 CSR_WRITE_1(sc, RE_CFG2, CSR_READ_1(sc, RE_CFG2) & ~BIT_7);
                 CSR_WRITE_1(sc, 0xF1, CSR_READ_1(sc, 0xF1) & ~BIT_7);
@@ -6442,7 +5147,8 @@ static void re_hw_start_unlock(struct re_softc *sc)
                         MP_WriteMcuAccessRegWord(sc, 0xD3C2, 0x0000);
                 }
 
-                if (sc->re_type == MACFG_68 || sc->re_type == MACFG_69) {
+                if (sc->re_type == MACFG_68 || sc->re_type == MACFG_69 ||
+                    sc->re_type == MACFG_74) {
                         MP_WriteMcuAccessRegWord(sc, 0xD400, MP_ReadMcuAccessRegWord(sc, 0xD400) & ~(BIT_0));
 
                         data16 = MP_ReadMcuAccessRegWord(sc, 0xE63E);
@@ -6478,18 +5184,15 @@ static void re_hw_start_unlock(struct re_softc *sc)
                         MP_WritePciEConfigSpace(sc, 0x2710, Data32);
                 }
 
-                if (sc->re_type == MACFG_68 || sc->re_type == MACFG_69) {
-                        Data32 = re_eri_read(sc, 0xD4, 4, ERIAR_ExGMAC);
-                        Data32 |= (BIT_8 | BIT_9 | BIT_10 | BIT_11 | BIT_12);
-                        re_eri_write(sc, 0xD4, 4, Data32, ERIAR_ExGMAC);
+                Data32 = re_eri_read(sc, 0xD4, 4, ERIAR_ExGMAC);
+                Data32 |= (BIT_7 | BIT_8 | BIT_9 | BIT_10 | BIT_11 | BIT_12);
+                re_eri_write(sc, 0xD4, 4, Data32, ERIAR_ExGMAC);
 
+                if (sc->re_type == MACFG_68 || sc->re_type == MACFG_69 ||
+                    sc->re_type == MACFG_74) {
                         Data32 = re_eri_read(sc, 0xDC, 4, ERIAR_ExGMAC);
                         Data32 |= (BIT_2| BIT_3 | BIT_4);
                         re_eri_write(sc, 0xDC, 4, Data32, ERIAR_ExGMAC);
-                } else {
-                        Data32 = re_eri_read(sc, 0xD4, 4, ERIAR_ExGMAC);
-                        Data32 |= (BIT_7 | BIT_8 | BIT_9 | BIT_10 | BIT_11 | BIT_12);
-                        re_eri_write(sc, 0xD4, 4, Data32, ERIAR_ExGMAC);
                 }
 
                 re_eri_write(sc, 0xC8, 4, 0x00080002, ERIAR_ExGMAC);
@@ -6497,16 +5200,25 @@ static void re_hw_start_unlock(struct re_softc *sc)
                 re_eri_write(sc, 0xD0, 1, 0x48, ERIAR_ExGMAC);
                 re_eri_write(sc, 0xE8, 4, 0x00100006, ERIAR_ExGMAC);
 
-                if (sc->re_type == MACFG_68 || sc->re_type == MACFG_69)
-                        MP_WriteMcuAccessRegWord(sc, 0xE054, 0xFC01);
+                if (sc->re_type == MACFG_68 || sc->re_type == MACFG_69 ||
+                    sc->re_type == MACFG_74) {
+                        MP_WriteMcuAccessRegWord(sc, 0xE054, 0x0000);
 
-                re_eri_write(sc, 0x5F0, 4, 0x4F87, ERIAR_ExGMAC);
+                        Data32 = re_eri_read(sc, 0x5F0, 4, ERIAR_ExGMAC);
+                        Data32 &= ~(BIT_11 | BIT_10 | BIT_9 | BIT_8 | BIT_3 | BIT_2 | BIT_1 | BIT_0);
+                        re_eri_write(sc, 0x5F0, 4, Data32, ERIAR_ExGMAC);
+                } else {
+                        re_eri_write(sc, 0x5F0, 2, 0x4F87, ERIAR_ExGMAC);
+                }
 
                 Data32 = re_eri_read(sc, 0xdc, 4, ERIAR_ExGMAC);
                 Data32 &= ~BIT_0;
                 re_eri_write(sc, 0xdc, 1, Data32, ERIAR_ExGMAC);
                 Data32 |= BIT_0;
                 re_eri_write(sc, 0xdc, 1, Data32, ERIAR_ExGMAC);
+
+                if (sc->re_type == MACFG_74)
+                        SetMcuAccessRegBit(sc, 0xD438, (BIT_1 | BIT_0));
 
                 Data32 = re_eri_read(sc, 0x2FC, 4, ERIAR_ExGMAC);
                 Data32 &= ~(BIT_0 | BIT_1 | BIT_2);
@@ -6590,12 +5302,16 @@ static void re_hw_start_unlock(struct re_softc *sc)
 
                         MP_WriteEPhyUshort(sc, 0x04, 0x854A);
                         MP_WriteEPhyUshort(sc, 0x01, 0x068B);
+                } else if (sc->re_type == MACFG_74) {
+                        ClearMcuAccessRegBit(sc, 0xDE28, (BIT_1 | BIT_0));
+
+                        SetMcuAccessRegBit(sc, 0xDE38, (BIT_2));
                 }
 
                 if (sc->re_type == MACFG_60) {
                         data16 = MP_ReadMcuAccessRegWord(sc, 0xD3C0);
                         data16 &= 0xF000;
-                        data16 |= 0x3A9;
+                        data16 |= 0x0FFF;
                         MP_WriteMcuAccessRegWord(sc, 0xD3C0, data16);
 
                         data16 = MP_ReadMcuAccessRegWord(sc, 0xD3C2);
@@ -6615,18 +5331,16 @@ static void re_hw_start_unlock(struct re_softc *sc)
 
                         data16 = MP_ReadMcuAccessRegWord(sc, 0xE056);
                         data16 &= ~(BIT_7 | BIT_6 | BIT_5 | BIT_4);
-                        data16 |= (BIT_6 | BIT_5 | BIT_4);
                         MP_WriteMcuAccessRegWord(sc, 0xE056, data16);
 
                         data16 = MP_ReadMcuAccessRegWord(sc, 0xE052);
-                        data16 &= ~(BIT_14 | BIT_13);
+                        data16 &= ~(BIT_15 | BIT_14 | BIT_13 | BIT_3);
                         data16 |= BIT_15;
-                        data16 |= BIT_3;
                         MP_WriteMcuAccessRegWord(sc, 0xE052, data16);
 
                         data16 = MP_ReadMcuAccessRegWord(sc, 0xD420);
                         data16 &= ~(BIT_11 | BIT_10 | BIT_9 | BIT_8 | BIT_7 | BIT_6 | BIT_5 | BIT_4 | BIT_3 | BIT_2 | BIT_1 | BIT_0);
-                        data16 |= 0x47F;
+                        data16 |= 0x45F;
                         MP_WriteMcuAccessRegWord(sc, 0xD420, data16);
 
                         data16 = MP_ReadMcuAccessRegWord(sc, 0xE0D6);
@@ -6647,7 +5361,8 @@ static void re_hw_start_unlock(struct re_softc *sc)
                 if (sc->re_type == MACFG_56 || sc->re_type == MACFG_57 ||
                     sc->re_type == MACFG_58 || sc->re_type == MACFG_59) {
                         MP_WriteMcuAccessRegWord(sc, 0xC140, 0xFFFF);
-                } else if (sc->re_type == MACFG_68 || sc->re_type == MACFG_69) {
+                } else if (sc->re_type == MACFG_68 || sc->re_type == MACFG_69 ||
+                           sc->re_type == MACFG_74) {
                         MP_WriteMcuAccessRegWord(sc, 0xC140, 0xFFFF);
                         MP_WriteMcuAccessRegWord(sc, 0xC142, 0xFFFF);
                 }
@@ -6789,7 +5504,7 @@ static void re_hw_start_unlock(struct re_softc *sc)
 
                 data16 = MP_ReadMcuAccessRegWord(sc, 0xE056);
                 data16 &= ~(BIT_7 | BIT_6 | BIT_5 | BIT_4);
-                if (FALSE == HW_SUPP_SERDES_PHY(sc))
+                if (sc->HwPkgDet == 0x0F)
                         data16 |= (BIT_6 | BIT_5 | BIT_4);
                 MP_WriteMcuAccessRegWord(sc, 0xE056, data16);
                 if (FALSE == HW_SUPP_SERDES_PHY(sc))
@@ -6800,17 +5515,14 @@ static void re_hw_start_unlock(struct re_softc *sc)
                 OOB_mutex_lock(sc);
                 data16 = MP_ReadMcuAccessRegWord(sc, 0xE052);
                 data16 &= ~(BIT_3 | BIT_0);
-                if (FALSE == HW_SUPP_SERDES_PHY(sc)) {
+                if (sc->HwPkgDet == 0x0F)
                         data16 |= BIT_0;
-                        if (sc->re_type == MACFG_71 || sc->re_type == MACFG_72)
-                                data16 |= BIT_3;
-                }
                 MP_WriteMcuAccessRegWord(sc, 0xE052, data16);
                 OOB_mutex_unlock(sc);
 
                 data16 = MP_ReadMcuAccessRegWord(sc, 0xD420);
                 data16 &= ~(BIT_11 | BIT_10 | BIT_9 | BIT_8 | BIT_7 | BIT_6 | BIT_5 | BIT_4 | BIT_3 | BIT_2 | BIT_1 | BIT_0);
-                data16 |= 0x47F;
+                data16 |= 0x45F;
                 MP_WriteMcuAccessRegWord(sc, 0xD420, data16);
 
                 CSR_WRITE_1(sc, RE_TDFNR, 0x4);
@@ -6838,7 +5550,8 @@ static void re_hw_start_unlock(struct re_softc *sc)
 
                 Data32 = re_eri_read(sc, 0xD4, 4, ERIAR_ExGMAC);
                 Data32 |= BIT_7 | BIT_8 | BIT_9 | BIT_10 | BIT_11 | BIT_12;
-                if (sc->re_type == MACFG_71 || sc->re_type == MACFG_72)
+                if (sc->re_type == MACFG_71 || sc->re_type == MACFG_72 ||
+                    sc->re_type == MACFG_73)
                         Data32 |= BIT_4;
                 re_eri_write(sc, 0xD4, 4, Data32, ERIAR_ExGMAC);
 
@@ -6848,10 +5561,10 @@ static void re_hw_start_unlock(struct re_softc *sc)
                 re_eri_write(sc, 0xE8, 4, 0x00100006, ERIAR_ExGMAC);
 
                 OOB_mutex_lock(sc);
-                if (FALSE == HW_SUPP_SERDES_PHY(sc))
-                        re_eri_write(sc, 0x5F0, 2, 0x4F87, ERIAR_ExGMAC);
+                if (sc->HwPkgDet == 0x0F)
+                        re_eri_write(sc, 0x5F0, 2, 0x4F00, ERIAR_ExGMAC);
                 else
-                        re_eri_write(sc, 0x5F0, 2, 0x4080, ERIAR_ExGMAC);
+                        re_eri_write(sc, 0x5F0, 2, 0x4000, ERIAR_ExGMAC);
                 OOB_mutex_unlock(sc);
 
                 Data32 = re_eri_read(sc, 0xdc, 4, ERIAR_ExGMAC);
@@ -6951,6 +5664,8 @@ static void re_hw_start_unlock(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
                 CSR_WRITE_1(sc, RE_CFG3, CSR_READ_1(sc, RE_CFG3) & ~BIT_1);
                 break;
         }
@@ -6981,6 +5696,8 @@ static void re_hw_start_unlock(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
                 CSR_WRITE_1(sc, RE_CFG5, CSR_READ_1(sc, RE_CFG5) | BIT_0);
                 CSR_WRITE_1(sc, RE_CFG2, CSR_READ_1(sc, RE_CFG2) | BIT_7);
                 CSR_WRITE_1(sc, 0xF1, CSR_READ_1(sc, 0xF1) & ~BIT_7);
@@ -7078,7 +5795,6 @@ static void re_init(void *xsc)  	/* Software & Hardware Initialize */
         struct re_softc		*sc = xsc;
         struct ifnet		*ifp;
 
-        RE_LOCK(sc);
         ifp = RE_GET_IFNET(sc);
 
         if (re_link_ok(sc)) {
@@ -7089,8 +5805,6 @@ static void re_init(void *xsc)  	/* Software & Hardware Initialize */
 
         sc->re_link_chg_det = 1;
         re_start_timer(sc);
-
-        RE_UNLOCK(sc);
 }
 
 static void re_hw_start_unlock_8125(struct re_softc *sc)
@@ -7243,20 +5957,15 @@ static void re_hw_start_unlock_8125(struct re_softc *sc)
                 } else if (sc->re_type == MACFG_83) {
                         MP_WriteEPhyUshort(sc, 0x0B, 0xA908);
                         MP_WriteEPhyUshort(sc, 0x1E, 0x20EB);
+                        MP_WriteEPhyUshort(sc, 0x22, 0x0023);
+                        MP_WriteEPhyUshort(sc, 0x02, 0x60C2);
+                        MP_WriteEPhyUshort(sc, 0x29, 0xFF00);
 
                         MP_WriteEPhyUshort(sc, 0x4B, 0xA908);
-                        MP_WriteEPhyUshort(sc, 0x5E, 0x20EB);
-
-                        ClearAndSetPCIePhyBit(sc,
-                                              0x22,
-                                              (BIT_5 | BIT_4),
-                                              BIT_5
-                                             );
-                        ClearAndSetPCIePhyBit(sc,
-                                              0x62,
-                                              (BIT_5 | BIT_4),
-                                              BIT_5
-                                             );
+                        MP_WriteEPhyUshort(sc, 0x5E, 0x28EB);
+                        MP_WriteEPhyUshort(sc, 0x62, 0x0023);
+                        MP_WriteEPhyUshort(sc, 0x42, 0x60C2);
+                        MP_WriteEPhyUshort(sc, 0x69, 0xFF00);
                 }
 
                 MP_WriteMcuAccessRegWord(sc, 0xC140, 0xFFFF);
@@ -7269,14 +5978,10 @@ static void re_hw_start_unlock_8125(struct re_softc *sc)
 
                 data16 = MP_ReadMcuAccessRegWord(sc, 0xE614);
                 data16 &= ~( BIT_10 | BIT_9 | BIT_8);
-                if (sc->re_type == MACFG_82 || sc->re_type == MACFG_83) {
-                        data16 |= ((2 & 0x07) << 8);
-                } else {
-                        if (sc->re_dash && !(MP_ReadByteFun0PciEConfigSpace(sc, 0x79) & BIT_0))
-                                data16 |= ((3 & 0x07) << 8);
-                        else
-                                data16 |= ((4 & 0x07) << 8);
-                }
+                if (sc->re_type == MACFG_82 || sc->re_type == MACFG_83)
+                        data16 |= (2 << 8);
+                else
+                        data16 |= (3 << 8);
                 MP_WriteMcuAccessRegWord(sc, 0xE614, data16);
 
                 data16 = MP_ReadMcuAccessRegWord(sc, 0xE63E);
@@ -7306,7 +6011,7 @@ static void re_hw_start_unlock_8125(struct re_softc *sc)
 
                 data16 = MP_ReadMcuAccessRegWord(sc, 0xE056);
                 data16 &= ~(BIT_7 | BIT_6 | BIT_5 | BIT_4);
-                data16 |= (BIT_4 | BIT_5);
+                //data16 |= (BIT_4 | BIT_5);
                 MP_WriteMcuAccessRegWord(sc, 0xE056, data16);
 
                 CSR_WRITE_1(sc, 0xD0, CSR_READ_1(sc, 0xD0) | BIT_7);
@@ -7320,33 +6025,24 @@ static void re_hw_start_unlock_8125(struct re_softc *sc)
                 data16 |= (BIT_0);
                 MP_WriteMcuAccessRegWord(sc, 0xEA1C, data16);
 
-                data16 = MP_ReadMcuAccessRegWord(sc, 0xE0C0);
-                data16 &= ~(BIT_14 | BIT_11 | BIT_10 | BIT_9 | BIT_8 | BIT_3 | BIT_2 | BIT_1 | BIT_0);
-                data16 |= (BIT_14 | BIT_10 | BIT_1 | BIT_0);
-                MP_WriteMcuAccessRegWord(sc, 0xE0C0, data16);
+                MP_WriteMcuAccessRegWord(sc, 0xE0C0, 0x4000);
 
-                SetMcuAccessRegBit(sc, 0xE052, (BIT_6|BIT_5|BIT_3));
-                ClearMcuAccessRegBit(sc, 0xE052, BIT_7);
+                SetMcuAccessRegBit(sc, 0xE052, (BIT_6 | BIT_5));
+                ClearMcuAccessRegBit(sc, 0xE052, BIT_3 | BIT_7);
 
                 data16 = MP_ReadMcuAccessRegWord(sc, 0xC0AC);
-                data16 &= ~(BIT_7);
-                data16 |= (BIT_8|BIT_9|BIT_10|BIT_11|BIT_12);
+                data16 |= (BIT_7|BIT_8|BIT_9|BIT_10|BIT_11|BIT_12);
+                if (macver == 0x60800000)
+                        data16 &= ~(BIT_7);
                 MP_WriteMcuAccessRegWord(sc, 0xC0AC, data16);
 
                 data16 = MP_ReadMcuAccessRegWord(sc, 0xD430);
                 data16 &= ~(BIT_11 | BIT_10 | BIT_9 | BIT_8 | BIT_7 | BIT_6 | BIT_5 | BIT_4 | BIT_3 | BIT_2 | BIT_1 | BIT_0);
-                data16 |= 0x47F;
+                data16 |= 0x45F;
                 MP_WriteMcuAccessRegWord(sc, 0xD430, data16);
 
                 //MP_WriteMcuAccessRegWord(sc, 0xE0C0, 0x4F87);
-                data16 = MP_ReadMcuAccessRegWord(sc, 0xE84C);
-                data16 &= ~BIT_6;
-                if (sc->re_type == MACFG_80 || sc->re_type == MACFG_81)
-                        data16 |= BIT_6;
-                data16 |= BIT_7;
-                MP_WriteMcuAccessRegWord(sc, 0xE84C, data16);
-
-                CSR_WRITE_1(sc, 0xD0, CSR_READ_1(sc, 0xD0) | BIT_6);
+                CSR_WRITE_1(sc, 0xD0, CSR_READ_1(sc, 0xD0) | (BIT_6 | BIT_7));
 
                 if (sc->re_type == MACFG_80 || sc->re_type == MACFG_81)
                         CSR_WRITE_1(sc, 0xD3, CSR_READ_1(sc, 0xD3) | BIT_0);
@@ -7547,6 +6243,8 @@ static void re_reset(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
         case MACFG_80:
         case MACFG_81:
         case MACFG_82:
@@ -7613,7 +6311,7 @@ re_set_wol_linkspeed(struct re_softc *sc)
 
         if (wol_link_speed == RE_WOL_LINK_SPEED_10M_FIRST)
                 anar &= ~(ANAR_TX_FD | ANAR_TX);
-        if (sc->re_device_id==RT_DEVICEID_8125) {
+        if (sc->re_device_id==RT_DEVICEID_8125 || sc->re_device_id==RT_DEVICEID_8162) {
                 u_int16_t gbcr;
 
                 ClearEthPhyOcpBit(sc, 0xA5D4, RTK_ADVERTISE_2500FULL);
@@ -7796,6 +6494,16 @@ static void re_stop(struct re_softc *sc)  	/* Stop Driver */
                 re_eri_write(sc, 0x1bc, 4, 0x0000001f, ERIAR_ExGMAC);
                 re_eri_write(sc, 0x1dc, 4, 0x0000003f, ERIAR_ExGMAC);
         }
+
+        switch (sc->re_type) {
+        case MACFG_74:
+                SetMcuAccessRegBit(sc, 0xD438, BIT_3);
+                SetMcuAccessRegBit(sc, 0xDE38, BIT_2);
+                ClearMcuAccessRegBit(sc, 0xDE28, (BIT_1 | BIT_0));
+                SetMcuAccessRegBit(sc, 0xD438, (BIT_1 | BIT_0));
+                break;
+        }
+
         re_reset(sc);
 
         /*
@@ -7849,6 +6557,14 @@ static void re_start(struct ifnet *ifp)  	/* Transmit Packet*/
                 IFQ_DRV_DEQUEUE(&ifp->if_snd, m_head);	/* Remove(get) data from system transmit queue */
                 if (m_head == NULL) {
                         break;
+                }
+
+                if (sc->re_device_id == RT_DEVICEID_8125) {
+                        if (re_8125_pad(sc, m_head) != 0) {
+                                IFQ_DRV_PREPEND(&ifp->if_snd, m_head);
+                                ifp->if_drv_flags |= IFF_DRV_OACTIVE;
+                                break;
+                        }
                 }
 
                 if (sc->re_coalesce_tx_pkt) {
@@ -7969,6 +6685,49 @@ static int re_encap(struct re_softc *sc,struct mbuf *m_head)
 
         sc->re_desc.tx_buf[sc->re_desc.tx_cur_index] = m_head;
 
+        return(0);
+}
+
+#define MIN_IPV4_PATCH_PKT_LEN (121)
+#define MIN_IPV6_PATCH_PKT_LEN (147)
+static int re_8125_pad(struct re_softc *sc,struct mbuf *m_head)
+{
+        struct ether_header *eh = mtod(m_head, struct ether_header *);
+        uint32_t min_pkt_len;
+        uint16_t ether_type = ntohs(eh->ether_type);
+
+        if ((m_head->m_pkthdr.csum_flags & (CSUM_TCP | CSUM_UDP)) != 0)
+                goto out;
+
+        min_pkt_len = RE_MIN_FRAMELEN;
+        if (ether_type == ETHERTYPE_IP) {
+                struct ip *ip = (struct ip *)mtodo(m_head, ETHER_HDR_LEN);
+                if (ip->ip_p == IPPROTO_UDP)
+                        min_pkt_len = MIN_IPV4_PATCH_PKT_LEN;
+        } else if (ether_type == ETHERTYPE_IPV6) {
+                struct ip6_hdr *ip6 = (struct ip6_hdr *)mtodo(m_head, ETHER_HDR_LEN);
+                if (ip6->ip6_nxt == IPPROTO_UDP)
+                        min_pkt_len = MIN_IPV6_PATCH_PKT_LEN;
+        }
+
+        if (m_head->m_pkthdr.len < min_pkt_len) {
+                static const uint8_t pad[MIN_IPV4_PATCH_PKT_LEN];
+                uint16_t pad_len = min_pkt_len - m_head->m_pkthdr.len;
+                if (!m_append(m_head, pad_len, pad))
+                        return (1);
+
+                if (ether_type == ETHERTYPE_IP &&
+                    m_head->m_pkthdr.csum_flags & CSUM_IP) {
+                        struct ip *ip;
+                        m_head->m_data += ETHER_HDR_LEN;
+                        ip = mtod(m_head, struct ip *);
+                        ip->ip_sum = in_cksum(m_head, ip->ip_hl << 2);
+                        m_head->m_data -= ETHER_HDR_LEN;
+                        m_head->m_pkthdr.csum_flags &= ~CSUM_IP;
+                }
+        }
+
+out:
         return(0);
 }
 
@@ -8884,10 +7643,10 @@ static void re_link_on_patch(struct re_softc *sc)
                     sc->re_type == MACFG_62 || sc->re_type == MACFG_67 ||
                     sc->re_type == MACFG_68 || sc->re_type == MACFG_69 ||
                     sc->re_type == MACFG_70 || sc->re_type == MACFG_71 ||
-                    sc->re_type == MACFG_72 || sc->re_type == MACFG_80 ||
+                    sc->re_type == MACFG_72 || sc->re_type == MACFG_73 ||
+                    sc->re_type == MACFG_73 || sc->re_type == MACFG_80 ||
                     sc->re_type == MACFG_81 || sc->re_type == MACFG_82 ||
-                    sc->re_type == MACFG_83) &&
-                   (ifp->if_flags & IFF_UP)) {
+                    sc->re_type == MACFG_83) && (ifp->if_flags & IFF_UP)) {
                 if (CSR_READ_1(sc, RE_PHY_STATUS) & RL_PHY_STATUS_FULL_DUP)
                         CSR_WRITE_4(sc, RE_TXCFG, (CSR_READ_4(sc, RE_TXCFG) | (BIT_24 | BIT_25)) & ~BIT_19);
                 else
@@ -8905,7 +7664,7 @@ static void re_link_on_patch(struct re_softc *sc)
 
         if (CSR_READ_1(sc, RE_PHY_STATUS) & RL_PHY_STATUS_10M) {
                 if (sc->re_type == MACFG_70 || sc->re_type == MACFG_71 ||
-                    sc->re_type == MACFG_72) {
+                    sc->re_type == MACFG_72 || sc->re_type == MACFG_73) {
                         uint32_t Data32;
 
                         Data32 = re_eri_read(sc, 0x1D0, 1, ERIAR_ExGMAC);
@@ -9055,12 +7814,13 @@ static int re_ifmedia_upd(struct ifnet *ifp)
 
         if (sc->re_type == MACFG_68 || sc->re_type == MACFG_69 ||
             sc->re_type == MACFG_70 || sc->re_type == MACFG_71 ||
-            sc->re_type == MACFG_72) {
+            sc->re_type == MACFG_72 || sc->re_type == MACFG_73 ||
+            sc->re_type == MACFG_74) {
                 //Disable Giga Lite
                 MP_WritePhyUshort(sc, 0x1F, 0x0A42);
                 ClearEthPhyBit(sc, 0x14, BIT_9);
                 if (sc->re_type == MACFG_70 || sc->re_type == MACFG_71 ||
-                    sc->re_type == MACFG_72)
+                    sc->re_type == MACFG_72 || sc->re_type == MACFG_73)
                         ClearEthPhyBit(sc, 0x14, BIT_7);
                 MP_WritePhyUshort(sc, 0x1F, 0x0A40);
                 MP_WritePhyUshort(sc, 0x1F, 0x0000);
@@ -9123,9 +7883,13 @@ static int re_ifmedia_upd(struct ifnet *ifp)
                 return(0);
         }
 
+        if (sc->re_device_id==RT_DEVICEID_8162)
+                ClearEthPhyOcpBit(sc, 0xA5D4, RTK_ADVERTISE_2500FULL);
+
         MP_WritePhyUshort(sc, 0x1F, 0x0000);
         if (sc->re_device_id==RT_DEVICEID_8169 || sc->re_device_id==RT_DEVICEID_8169SC ||
-            sc->re_device_id==RT_DEVICEID_8168 || sc->re_device_id==RT_DEVICEID_8161) {
+            sc->re_device_id==RT_DEVICEID_8168 || sc->re_device_id==RT_DEVICEID_8161 ||
+            sc->re_device_id==RT_DEVICEID_8162) {
                 MP_WritePhyUshort(sc, MII_ANAR, anar | 0x0800 | ANAR_FC);
                 MP_WritePhyUshort(sc, MII_100T2CR, gbcr);
                 MP_WritePhyUshort(sc, MII_BMCR, BMCR_RESET | BMCR_AUTOEN | BMCR_STARTNEG);
@@ -9459,6 +8223,8 @@ static int re_enable_EEE(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
                 data = re_eri_read(sc, 0x1B0, 4, ERIAR_ExGMAC);
                 data |= BIT_1 | BIT_0;
                 re_eri_write(sc, 0x1B0, 4, data, ERIAR_ExGMAC);
@@ -9504,6 +8270,7 @@ static int re_enable_EEE(struct re_softc *sc)
         switch (sc->re_type) {
         case MACFG_68:
         case MACFG_69:
+        case MACFG_74:
                 MP_WritePhyUshort(sc, 0x1F, 0x0A4A);
                 SetEthPhyBit(sc, 0x11, BIT_9);
                 MP_WritePhyUshort(sc, 0x1F, 0x0A42);
@@ -9522,6 +8289,8 @@ static int re_enable_EEE(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
         case MACFG_80:
         case MACFG_81:
         case MACFG_82:
@@ -9589,21 +8358,18 @@ static int re_enable_EEE(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
                 OOB_mutex_lock(sc);
-                data = MP_ReadMcuAccessRegWord(sc, 0xE052);
-                data &= ~BIT_0;
-                MP_WriteMcuAccessRegWord(sc, 0xE052, data);
+                if (sc->HwPkgDet == 0x0F)
+                        SetMcuAccessRegBit(sc, 0xE052, BIT_0);
+                else
+                        ClearMcuAccessRegBit(sc, 0xE052, BIT_0);
                 OOB_mutex_unlock(sc);
-                data = MP_ReadMcuAccessRegWord(sc, 0xE056);
-                data &= 0xFF0F;
-                data |= (BIT_4 | BIT_5 | BIT_6);
-                MP_WriteMcuAccessRegWord(sc, 0xE056, data);
                 break;
         case MACFG_68:
         case MACFG_69:
-                data = MP_ReadMcuAccessRegWord(sc, 0xE052);
-                data |= BIT_0;
-                MP_WriteMcuAccessRegWord(sc, 0xE052, data);
+        case MACFG_74:
+                ClearMcuAccessRegBit(sc, 0xE052, BIT_0);
 
                 MP_WritePhyUshort(sc, 0x1F, 0x0A43);
                 data = MP_ReadPhyUshort(sc, 0x10) | BIT_15;
@@ -9633,6 +8399,8 @@ static int re_enable_EEE(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
         case MACFG_80:
         case MACFG_81:
         case MACFG_82:
@@ -9795,6 +8563,8 @@ static int re_disable_EEE(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
                 data = re_eri_read(sc, 0x1B0, 4, ERIAR_ExGMAC);
                 data &= ~(BIT_1 | BIT_0);
                 re_eri_write(sc, 0x1B0, 4, data, ERIAR_ExGMAC);
@@ -9840,6 +8610,7 @@ static int re_disable_EEE(struct re_softc *sc)
         switch (sc->re_type) {
         case MACFG_68:
         case MACFG_69:
+        case MACFG_74:
                 MP_WritePhyUshort(sc, 0x1F, 0x0A42);
                 ClearEthPhyBit(sc, 0x14, BIT_7);
                 MP_WritePhyUshort(sc, 0x1F, 0x0A4A);
@@ -9858,6 +8629,8 @@ static int re_disable_EEE(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
         case MACFG_80:
         case MACFG_81:
         case MACFG_82:
@@ -9893,12 +8666,14 @@ static int re_disable_EEE(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
                 data = MP_ReadMcuAccessRegWord(sc, 0xE052);
                 data &= ~(BIT_0);
                 MP_WriteMcuAccessRegWord(sc, 0xE052, data);
                 break;
         case MACFG_68:
         case MACFG_69:
+        case MACFG_74:
                 data = MP_ReadMcuAccessRegWord(sc, 0xE052);
                 data &= ~(BIT_0);
                 MP_WriteMcuAccessRegWord(sc, 0xE052, data);
@@ -9931,6 +8706,8 @@ static int re_disable_EEE(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
         case MACFG_80:
         case MACFG_81:
         case MACFG_82:
@@ -10085,6 +8862,8 @@ static int re_hw_phy_mcu_code_ver_matched(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
                 MP_WritePhyUshort(sc, 0x1F, 0x0A43);
                 MP_WritePhyUshort(sc, 0x13, 0x801E);
                 sc->re_hw_ram_code_ver = MP_ReadPhyUshort(sc, 0x14);
@@ -10143,6 +8922,8 @@ static void re_write_hw_phy_mcu_code_ver(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
                 MP_WritePhyUshort(sc, 0x1F, 0x0A43);
                 MP_WritePhyUshort(sc, 0x13, 0x801E);
                 MP_WritePhyUshort(sc, 0x14, sc->re_sw_ram_code_ver);
@@ -10211,7 +8992,6 @@ re_set_phy_mcu_patch_request(struct re_softc *sc)
 {
         u_int16_t PhyRegValue;
         u_int16_t WaitCount = 0;
-        int i;
         bool bSuccess = TRUE;
 
         switch (sc->re_type) {
@@ -10228,6 +9008,8 @@ re_set_phy_mcu_patch_request(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
                 MP_WritePhyUshort(sc, 0x1f, 0x0B82);
                 SetEthPhyBit(sc, 0x10, BIT_4);
 
@@ -10235,13 +9017,12 @@ re_set_phy_mcu_patch_request(struct re_softc *sc)
                 WaitCount = 0;
                 do {
                         PhyRegValue = MP_ReadPhyUshort(sc, 0x10);
-                        PhyRegValue &= BIT_6;
                         DELAY(50);
                         DELAY(50);
                         WaitCount++;
-                } while(PhyRegValue != BIT_6 && WaitCount < 1000);
+                } while (!(PhyRegValue & BIT_6) && (WaitCount < 1000));
 
-                if (PhyRegValue != BIT_6 && WaitCount == 1000) bSuccess = FALSE;
+                if (!(PhyRegValue & BIT_6) && (WaitCount == 1000)) bSuccess = FALSE;
 
                 MP_WritePhyUshort(sc, 0x1f, 0x0000);
                 break;
@@ -10251,16 +9032,16 @@ re_set_phy_mcu_patch_request(struct re_softc *sc)
         case MACFG_83:
                 SetEthPhyOcpBit(sc, 0xB820, BIT_4);
 
-                i = 0;
+                WaitCount = 0;
                 do {
                         PhyRegValue = MP_RealReadPhyOcpRegWord(sc, 0xB800);
-                        PhyRegValue &= BIT_6;
                         DELAY(50);
                         DELAY(50);
-                        i++;
-                } while(PhyRegValue != BIT_6 && i < 1000);
+                        WaitCount++;
+                } while (!(PhyRegValue & BIT_6) && (WaitCount < 1000));
 
-                if (PhyRegValue != BIT_6 && WaitCount == 1000) bSuccess = FALSE;
+                if (!(PhyRegValue & BIT_6) && (WaitCount == 1000)) bSuccess = FALSE;
+
                 break;
         }
 
@@ -10272,7 +9053,6 @@ re_clear_phy_mcu_patch_request(struct re_softc *sc)
 {
         u_int16_t PhyRegValue;
         u_int16_t WaitCount = 0;
-        int i;
         bool bSuccess = TRUE;
 
         switch (sc->re_type) {
@@ -10289,6 +9069,8 @@ re_clear_phy_mcu_patch_request(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
                 MP_WritePhyUshort(sc, 0x1f, 0x0B82);
                 ClearEthPhyBit(sc, 0x10, BIT_4);
 
@@ -10296,13 +9078,12 @@ re_clear_phy_mcu_patch_request(struct re_softc *sc)
                 WaitCount = 0;
                 do {
                         PhyRegValue = MP_ReadPhyUshort(sc, 0x10);
-                        PhyRegValue &= BIT_6;
                         DELAY(50);
                         DELAY(50);
                         WaitCount++;
-                } while(PhyRegValue != BIT_6 && WaitCount < 1000);
+                } while ((PhyRegValue & BIT_6) && (WaitCount < 1000));
 
-                if (PhyRegValue != BIT_6 && WaitCount == 1000) bSuccess = FALSE;
+                if ((PhyRegValue & BIT_6) && (WaitCount == 1000)) bSuccess = FALSE;
 
                 MP_WritePhyUshort(sc, 0x1f, 0x0000);
                 break;
@@ -10312,16 +9093,16 @@ re_clear_phy_mcu_patch_request(struct re_softc *sc)
         case MACFG_83:
                 ClearEthPhyOcpBit(sc, 0xB820, BIT_4);
 
-                i = 0;
+                WaitCount = 0;
                 do {
                         PhyRegValue = MP_RealReadPhyOcpRegWord(sc, 0xB800);
-                        PhyRegValue &= BIT_6;
                         DELAY(50);
                         DELAY(50);
-                        i++;
-                } while(PhyRegValue != BIT_6 && i < 1000);
+                        WaitCount++;
+                } while ((PhyRegValue & BIT_6) && (WaitCount < 1000));
 
-                if (PhyRegValue != BIT_6 && WaitCount == 1000) bSuccess = FALSE;
+                if ((PhyRegValue & BIT_6) && (WaitCount == 1000)) bSuccess = FALSE;
+
                 break;
         }
 
@@ -21484,6 +20265,530 @@ static void re_set_phy_mcu_8168h_2(struct re_softc *sc)
         }
 }
 
+static void re_set_phy_mcu_8168h_3(struct re_softc *sc)
+{
+        u_int16_t PhyRegValue;
+
+        re_set_phy_mcu_patch_request(sc);
+
+        MP_WritePhyUshort(sc, 0x1f, 0x0A43);
+        MP_WritePhyUshort(sc, 0x13, 0x8042);
+        MP_WritePhyUshort(sc, 0x14, 0x3800);
+        MP_WritePhyUshort(sc, 0x13, 0xB82E);
+        MP_WritePhyUshort(sc, 0x14, 0x0001);
+
+        MP_WritePhyUshort(sc, 0x1F, 0x0A43);
+        MP_WritePhyUshort(sc, 0x13, 0xB820);
+        MP_WritePhyUshort(sc, 0x14, 0x0090);
+        MP_WritePhyUshort(sc, 0x13, 0xA016);
+        MP_WritePhyUshort(sc, 0x14, 0x0000);
+        MP_WritePhyUshort(sc, 0x13, 0xA012);
+        MP_WritePhyUshort(sc, 0x14, 0x0000);
+        MP_WritePhyUshort(sc, 0x13, 0xA014);
+        MP_WritePhyUshort(sc, 0x14, 0x1800);
+        MP_WritePhyUshort(sc, 0x14, 0x8002);
+        MP_WritePhyUshort(sc, 0x14, 0x2b5d);
+        MP_WritePhyUshort(sc, 0x14, 0x0c68);
+        MP_WritePhyUshort(sc, 0x14, 0x1800);
+        MP_WritePhyUshort(sc, 0x14, 0x0b3c);
+        MP_WritePhyUshort(sc, 0x13, 0xA000);
+        MP_WritePhyUshort(sc, 0x14, 0x0b3a);
+        MP_WritePhyUshort(sc, 0x13, 0xA008);
+        MP_WritePhyUshort(sc, 0x14, 0x0100);
+        MP_WritePhyUshort(sc, 0x13, 0xB820);
+        MP_WritePhyUshort(sc, 0x14, 0x0010);
+
+        MP_WritePhyUshort(sc, 0x13, 0x83f3);
+        MP_WritePhyUshort(sc, 0x14, 0xaf84);
+        MP_WritePhyUshort(sc, 0x14, 0x0baf);
+        MP_WritePhyUshort(sc, 0x14, 0x8466);
+        MP_WritePhyUshort(sc, 0x14, 0xaf84);
+        MP_WritePhyUshort(sc, 0x14, 0xcdaf);
+        MP_WritePhyUshort(sc, 0x14, 0x8736);
+        MP_WritePhyUshort(sc, 0x14, 0xaf87);
+        MP_WritePhyUshort(sc, 0x14, 0x39af);
+        MP_WritePhyUshort(sc, 0x14, 0x8739);
+        MP_WritePhyUshort(sc, 0x14, 0xaf87);
+        MP_WritePhyUshort(sc, 0x14, 0x39af);
+        MP_WritePhyUshort(sc, 0x14, 0x8739);
+        MP_WritePhyUshort(sc, 0x14, 0xef79);
+        MP_WritePhyUshort(sc, 0x14, 0xfb89);
+        MP_WritePhyUshort(sc, 0x14, 0xe987);
+        MP_WritePhyUshort(sc, 0x14, 0xffd7);
+        MP_WritePhyUshort(sc, 0x14, 0x0017);
+        MP_WritePhyUshort(sc, 0x14, 0xd400);
+        MP_WritePhyUshort(sc, 0x14, 0x051c);
+        MP_WritePhyUshort(sc, 0x14, 0x421a);
+        MP_WritePhyUshort(sc, 0x14, 0x741b);
+        MP_WritePhyUshort(sc, 0x14, 0x97e9);
+        MP_WritePhyUshort(sc, 0x14, 0x87fe);
+        MP_WritePhyUshort(sc, 0x14, 0xffef);
+        MP_WritePhyUshort(sc, 0x14, 0x97e0);
+        MP_WritePhyUshort(sc, 0x14, 0x82aa);
+        MP_WritePhyUshort(sc, 0x14, 0xa000);
+        MP_WritePhyUshort(sc, 0x14, 0x08ef);
+        MP_WritePhyUshort(sc, 0x14, 0x46dc);
+        MP_WritePhyUshort(sc, 0x14, 0x19dd);
+        MP_WritePhyUshort(sc, 0x14, 0xaf1a);
+        MP_WritePhyUshort(sc, 0x14, 0x37a0);
+        MP_WritePhyUshort(sc, 0x14, 0x012d);
+        MP_WritePhyUshort(sc, 0x14, 0xe082);
+        MP_WritePhyUshort(sc, 0x14, 0xa7ac);
+        MP_WritePhyUshort(sc, 0x14, 0x2013);
+        MP_WritePhyUshort(sc, 0x14, 0xe087);
+        MP_WritePhyUshort(sc, 0x14, 0xffe1);
+        MP_WritePhyUshort(sc, 0x14, 0x87fe);
+        MP_WritePhyUshort(sc, 0x14, 0xac27);
+        MP_WritePhyUshort(sc, 0x14, 0x05a1);
+        MP_WritePhyUshort(sc, 0x14, 0x0807);
+        MP_WritePhyUshort(sc, 0x14, 0xae0f);
+        MP_WritePhyUshort(sc, 0x14, 0xa107);
+        MP_WritePhyUshort(sc, 0x14, 0x02ae);
+        MP_WritePhyUshort(sc, 0x14, 0x0aef);
+        MP_WritePhyUshort(sc, 0x14, 0x4619);
+        MP_WritePhyUshort(sc, 0x14, 0x19dc);
+        MP_WritePhyUshort(sc, 0x14, 0x19dd);
+        MP_WritePhyUshort(sc, 0x14, 0xaf1a);
+        MP_WritePhyUshort(sc, 0x14, 0x37d8);
+        MP_WritePhyUshort(sc, 0x14, 0x19d9);
+        MP_WritePhyUshort(sc, 0x14, 0x19dc);
+        MP_WritePhyUshort(sc, 0x14, 0x19dd);
+        MP_WritePhyUshort(sc, 0x14, 0xaf1a);
+        MP_WritePhyUshort(sc, 0x14, 0x3719);
+        MP_WritePhyUshort(sc, 0x14, 0x19ae);
+        MP_WritePhyUshort(sc, 0x14, 0xcfbf);
+        MP_WritePhyUshort(sc, 0x14, 0x8763);
+        MP_WritePhyUshort(sc, 0x14, 0x0244);
+        MP_WritePhyUshort(sc, 0x14, 0xdc3c);
+        MP_WritePhyUshort(sc, 0x14, 0x0005);
+        MP_WritePhyUshort(sc, 0x14, 0xaaf5);
+        MP_WritePhyUshort(sc, 0x14, 0x0249);
+        MP_WritePhyUshort(sc, 0x14, 0xcaef);
+        MP_WritePhyUshort(sc, 0x14, 0x67d7);
+        MP_WritePhyUshort(sc, 0x14, 0x0014);
+        MP_WritePhyUshort(sc, 0x14, 0x0249);
+        MP_WritePhyUshort(sc, 0x14, 0xe5ad);
+        MP_WritePhyUshort(sc, 0x14, 0x50f7);
+        MP_WritePhyUshort(sc, 0x14, 0xd400);
+        MP_WritePhyUshort(sc, 0x14, 0x01bf);
+        MP_WritePhyUshort(sc, 0x14, 0x46a7);
+        MP_WritePhyUshort(sc, 0x14, 0x0244);
+        MP_WritePhyUshort(sc, 0x14, 0x98bf);
+        MP_WritePhyUshort(sc, 0x14, 0x465c);
+        MP_WritePhyUshort(sc, 0x14, 0x024a);
+        MP_WritePhyUshort(sc, 0x14, 0x5fd4);
+        MP_WritePhyUshort(sc, 0x14, 0x0003);
+        MP_WritePhyUshort(sc, 0x14, 0xbf87);
+        MP_WritePhyUshort(sc, 0x14, 0x7502);
+        MP_WritePhyUshort(sc, 0x14, 0x4498);
+        MP_WritePhyUshort(sc, 0x14, 0xbf87);
+        MP_WritePhyUshort(sc, 0x14, 0x7202);
+        MP_WritePhyUshort(sc, 0x14, 0x4a5f);
+        MP_WritePhyUshort(sc, 0x14, 0xbf87);
+        MP_WritePhyUshort(sc, 0x14, 0x6602);
+        MP_WritePhyUshort(sc, 0x14, 0x4a5f);
+        MP_WritePhyUshort(sc, 0x14, 0xbf87);
+        MP_WritePhyUshort(sc, 0x14, 0x6902);
+        MP_WritePhyUshort(sc, 0x14, 0x44dc);
+        MP_WritePhyUshort(sc, 0x14, 0xad28);
+        MP_WritePhyUshort(sc, 0x14, 0xf7bf);
+        MP_WritePhyUshort(sc, 0x14, 0x876f);
+        MP_WritePhyUshort(sc, 0x14, 0x0244);
+        MP_WritePhyUshort(sc, 0x14, 0xdcad);
+        MP_WritePhyUshort(sc, 0x14, 0x28f7);
+        MP_WritePhyUshort(sc, 0x14, 0xbf87);
+        MP_WritePhyUshort(sc, 0x14, 0x6c02);
+        MP_WritePhyUshort(sc, 0x14, 0x4a5f);
+        MP_WritePhyUshort(sc, 0x14, 0xbf87);
+        MP_WritePhyUshort(sc, 0x14, 0x6c02);
+        MP_WritePhyUshort(sc, 0x14, 0x4a56);
+        MP_WritePhyUshort(sc, 0x14, 0xbf46);
+        MP_WritePhyUshort(sc, 0x14, 0x5c02);
+        MP_WritePhyUshort(sc, 0x14, 0x4a56);
+        MP_WritePhyUshort(sc, 0x14, 0xbf45);
+        MP_WritePhyUshort(sc, 0x14, 0x21af);
+        MP_WritePhyUshort(sc, 0x14, 0x020e);
+        MP_WritePhyUshort(sc, 0x14, 0xee82);
+        MP_WritePhyUshort(sc, 0x14, 0x5000);
+        MP_WritePhyUshort(sc, 0x14, 0x0284);
+        MP_WritePhyUshort(sc, 0x14, 0xdd02);
+        MP_WritePhyUshort(sc, 0x14, 0x8521);
+        MP_WritePhyUshort(sc, 0x14, 0x0285);
+        MP_WritePhyUshort(sc, 0x14, 0x36af);
+        MP_WritePhyUshort(sc, 0x14, 0x03d2);
+        MP_WritePhyUshort(sc, 0x14, 0xf8f9);
+        MP_WritePhyUshort(sc, 0x14, 0xfafb);
+        MP_WritePhyUshort(sc, 0x14, 0xef59);
+        MP_WritePhyUshort(sc, 0x14, 0xbf45);
+        MP_WritePhyUshort(sc, 0x14, 0x3002);
+        MP_WritePhyUshort(sc, 0x14, 0x44dc);
+        MP_WritePhyUshort(sc, 0x14, 0x3c00);
+        MP_WritePhyUshort(sc, 0x14, 0x03aa);
+        MP_WritePhyUshort(sc, 0x14, 0x2cbf);
+        MP_WritePhyUshort(sc, 0x14, 0x8769);
+        MP_WritePhyUshort(sc, 0x14, 0x0244);
+        MP_WritePhyUshort(sc, 0x14, 0xdcad);
+        MP_WritePhyUshort(sc, 0x14, 0x2823);
+        MP_WritePhyUshort(sc, 0x14, 0xbf87);
+        MP_WritePhyUshort(sc, 0x14, 0x6f02);
+        MP_WritePhyUshort(sc, 0x14, 0x44dc);
+        MP_WritePhyUshort(sc, 0x14, 0xad28);
+        MP_WritePhyUshort(sc, 0x14, 0x1a02);
+        MP_WritePhyUshort(sc, 0x14, 0x49ca);
+        MP_WritePhyUshort(sc, 0x14, 0xef67);
+        MP_WritePhyUshort(sc, 0x14, 0xd700);
+        MP_WritePhyUshort(sc, 0x14, 0x0202);
+        MP_WritePhyUshort(sc, 0x14, 0x49e5);
+        MP_WritePhyUshort(sc, 0x14, 0xad50);
+        MP_WritePhyUshort(sc, 0x14, 0xf7bf);
+        MP_WritePhyUshort(sc, 0x14, 0x876c);
+        MP_WritePhyUshort(sc, 0x14, 0x024a);
+        MP_WritePhyUshort(sc, 0x14, 0x5fbf);
+        MP_WritePhyUshort(sc, 0x14, 0x876c);
+        MP_WritePhyUshort(sc, 0x14, 0x024a);
+        MP_WritePhyUshort(sc, 0x14, 0x56ef);
+        MP_WritePhyUshort(sc, 0x14, 0x95ff);
+        MP_WritePhyUshort(sc, 0x14, 0xfefd);
+        MP_WritePhyUshort(sc, 0x14, 0xfc04);
+        MP_WritePhyUshort(sc, 0x14, 0xf8fa);
+        MP_WritePhyUshort(sc, 0x14, 0xef69);
+        MP_WritePhyUshort(sc, 0x14, 0xe080);
+        MP_WritePhyUshort(sc, 0x14, 0x15ad);
+        MP_WritePhyUshort(sc, 0x14, 0x2406);
+        MP_WritePhyUshort(sc, 0x14, 0xbf87);
+        MP_WritePhyUshort(sc, 0x14, 0x6002);
+        MP_WritePhyUshort(sc, 0x14, 0x4a56);
+        MP_WritePhyUshort(sc, 0x14, 0xef96);
+        MP_WritePhyUshort(sc, 0x14, 0xfefc);
+        MP_WritePhyUshort(sc, 0x14, 0x04f8);
+        MP_WritePhyUshort(sc, 0x14, 0xe087);
+        MP_WritePhyUshort(sc, 0x14, 0xf9e1);
+        MP_WritePhyUshort(sc, 0x14, 0x87fa);
+        MP_WritePhyUshort(sc, 0x14, 0x1b10);
+        MP_WritePhyUshort(sc, 0x14, 0x9f1e);
+        MP_WritePhyUshort(sc, 0x14, 0xee87);
+        MP_WritePhyUshort(sc, 0x14, 0xf900);
+        MP_WritePhyUshort(sc, 0x14, 0xe080);
+        MP_WritePhyUshort(sc, 0x14, 0x15ac);
+        MP_WritePhyUshort(sc, 0x14, 0x2606);
+        MP_WritePhyUshort(sc, 0x14, 0xee87);
+        MP_WritePhyUshort(sc, 0x14, 0xf700);
+        MP_WritePhyUshort(sc, 0x14, 0xae12);
+        MP_WritePhyUshort(sc, 0x14, 0x0286);
+        MP_WritePhyUshort(sc, 0x14, 0x9702);
+        MP_WritePhyUshort(sc, 0x14, 0x8565);
+        MP_WritePhyUshort(sc, 0x14, 0x0285);
+        MP_WritePhyUshort(sc, 0x14, 0x9d02);
+        MP_WritePhyUshort(sc, 0x14, 0x865a);
+        MP_WritePhyUshort(sc, 0x14, 0xae04);
+        MP_WritePhyUshort(sc, 0x14, 0x10e4);
+        MP_WritePhyUshort(sc, 0x14, 0x87f9);
+        MP_WritePhyUshort(sc, 0x14, 0xfc04);
+        MP_WritePhyUshort(sc, 0x14, 0xf8f9);
+        MP_WritePhyUshort(sc, 0x14, 0xfaef);
+        MP_WritePhyUshort(sc, 0x14, 0x69fa);
+        MP_WritePhyUshort(sc, 0x14, 0xbf45);
+        MP_WritePhyUshort(sc, 0x14, 0x3002);
+        MP_WritePhyUshort(sc, 0x14, 0x44dc);
+        MP_WritePhyUshort(sc, 0x14, 0xa103);
+        MP_WritePhyUshort(sc, 0x14, 0x22e0);
+        MP_WritePhyUshort(sc, 0x14, 0x87eb);
+        MP_WritePhyUshort(sc, 0x14, 0xe187);
+        MP_WritePhyUshort(sc, 0x14, 0xecef);
+        MP_WritePhyUshort(sc, 0x14, 0x64bf);
+        MP_WritePhyUshort(sc, 0x14, 0x8748);
+        MP_WritePhyUshort(sc, 0x14, 0x0244);
+        MP_WritePhyUshort(sc, 0x14, 0xdc1b);
+        MP_WritePhyUshort(sc, 0x14, 0x46aa);
+        MP_WritePhyUshort(sc, 0x14, 0x0abf);
+        MP_WritePhyUshort(sc, 0x14, 0x874b);
+        MP_WritePhyUshort(sc, 0x14, 0x0244);
+        MP_WritePhyUshort(sc, 0x14, 0xdc1b);
+        MP_WritePhyUshort(sc, 0x14, 0x46ab);
+        MP_WritePhyUshort(sc, 0x14, 0x06bf);
+        MP_WritePhyUshort(sc, 0x14, 0x8745);
+        MP_WritePhyUshort(sc, 0x14, 0x024a);
+        MP_WritePhyUshort(sc, 0x14, 0x5ffe);
+        MP_WritePhyUshort(sc, 0x14, 0xef96);
+        MP_WritePhyUshort(sc, 0x14, 0xfefd);
+        MP_WritePhyUshort(sc, 0x14, 0xfc04);
+        MP_WritePhyUshort(sc, 0x14, 0xf8f9);
+        MP_WritePhyUshort(sc, 0x14, 0xef59);
+        MP_WritePhyUshort(sc, 0x14, 0xf9bf);
+        MP_WritePhyUshort(sc, 0x14, 0x4530);
+        MP_WritePhyUshort(sc, 0x14, 0x0244);
+        MP_WritePhyUshort(sc, 0x14, 0xdca1);
+        MP_WritePhyUshort(sc, 0x14, 0x0310);
+        MP_WritePhyUshort(sc, 0x14, 0xe087);
+        MP_WritePhyUshort(sc, 0x14, 0xf7ac);
+        MP_WritePhyUshort(sc, 0x14, 0x2605);
+        MP_WritePhyUshort(sc, 0x14, 0x0285);
+        MP_WritePhyUshort(sc, 0x14, 0xc9ae);
+        MP_WritePhyUshort(sc, 0x14, 0x0d02);
+        MP_WritePhyUshort(sc, 0x14, 0x860d);
+        MP_WritePhyUshort(sc, 0x14, 0xae08);
+        MP_WritePhyUshort(sc, 0x14, 0xe287);
+        MP_WritePhyUshort(sc, 0x14, 0xf7f6);
+        MP_WritePhyUshort(sc, 0x14, 0x36e6);
+        MP_WritePhyUshort(sc, 0x14, 0x87f7);
+        MP_WritePhyUshort(sc, 0x14, 0xfdef);
+        MP_WritePhyUshort(sc, 0x14, 0x95fd);
+        MP_WritePhyUshort(sc, 0x14, 0xfc04);
+        MP_WritePhyUshort(sc, 0x14, 0xf8f9);
+        MP_WritePhyUshort(sc, 0x14, 0xfafb);
+        MP_WritePhyUshort(sc, 0x14, 0xef79);
+        MP_WritePhyUshort(sc, 0x14, 0xfbbf);
+        MP_WritePhyUshort(sc, 0x14, 0x8748);
+        MP_WritePhyUshort(sc, 0x14, 0x0244);
+        MP_WritePhyUshort(sc, 0x14, 0xdcef);
+        MP_WritePhyUshort(sc, 0x14, 0x64e2);
+        MP_WritePhyUshort(sc, 0x14, 0x87e9);
+        MP_WritePhyUshort(sc, 0x14, 0xe387);
+        MP_WritePhyUshort(sc, 0x14, 0xea1b);
+        MP_WritePhyUshort(sc, 0x14, 0x659e);
+        MP_WritePhyUshort(sc, 0x14, 0x10e4);
+        MP_WritePhyUshort(sc, 0x14, 0x87e9);
+        MP_WritePhyUshort(sc, 0x14, 0xe587);
+        MP_WritePhyUshort(sc, 0x14, 0xeae2);
+        MP_WritePhyUshort(sc, 0x14, 0x87f7);
+        MP_WritePhyUshort(sc, 0x14, 0xf636);
+        MP_WritePhyUshort(sc, 0x14, 0xe687);
+        MP_WritePhyUshort(sc, 0x14, 0xf7ae);
+        MP_WritePhyUshort(sc, 0x14, 0x13e2);
+        MP_WritePhyUshort(sc, 0x14, 0x87f7);
+        MP_WritePhyUshort(sc, 0x14, 0xf736);
+        MP_WritePhyUshort(sc, 0x14, 0xe687);
+        MP_WritePhyUshort(sc, 0x14, 0xf702);
+        MP_WritePhyUshort(sc, 0x14, 0x49ca);
+        MP_WritePhyUshort(sc, 0x14, 0xef57);
+        MP_WritePhyUshort(sc, 0x14, 0xe687);
+        MP_WritePhyUshort(sc, 0x14, 0xe7e7);
+        MP_WritePhyUshort(sc, 0x14, 0x87e8);
+        MP_WritePhyUshort(sc, 0x14, 0xffef);
+        MP_WritePhyUshort(sc, 0x14, 0x97ff);
+        MP_WritePhyUshort(sc, 0x14, 0xfefd);
+        MP_WritePhyUshort(sc, 0x14, 0xfc04);
+        MP_WritePhyUshort(sc, 0x14, 0xf8f9);
+        MP_WritePhyUshort(sc, 0x14, 0xfafb);
+        MP_WritePhyUshort(sc, 0x14, 0xef79);
+        MP_WritePhyUshort(sc, 0x14, 0xfbe2);
+        MP_WritePhyUshort(sc, 0x14, 0x87e7);
+        MP_WritePhyUshort(sc, 0x14, 0xe387);
+        MP_WritePhyUshort(sc, 0x14, 0xe8ef);
+        MP_WritePhyUshort(sc, 0x14, 0x65e2);
+        MP_WritePhyUshort(sc, 0x14, 0x87fb);
+        MP_WritePhyUshort(sc, 0x14, 0xe387);
+        MP_WritePhyUshort(sc, 0x14, 0xfcef);
+        MP_WritePhyUshort(sc, 0x14, 0x7502);
+        MP_WritePhyUshort(sc, 0x14, 0x49e5);
+        MP_WritePhyUshort(sc, 0x14, 0xac50);
+        MP_WritePhyUshort(sc, 0x14, 0x1abf);
+        MP_WritePhyUshort(sc, 0x14, 0x8748);
+        MP_WritePhyUshort(sc, 0x14, 0x0244);
+        MP_WritePhyUshort(sc, 0x14, 0xdcef);
+        MP_WritePhyUshort(sc, 0x14, 0x64e2);
+        MP_WritePhyUshort(sc, 0x14, 0x87e9);
+        MP_WritePhyUshort(sc, 0x14, 0xe387);
+        MP_WritePhyUshort(sc, 0x14, 0xea1b);
+        MP_WritePhyUshort(sc, 0x14, 0x659e);
+        MP_WritePhyUshort(sc, 0x14, 0x16e4);
+        MP_WritePhyUshort(sc, 0x14, 0x87e9);
+        MP_WritePhyUshort(sc, 0x14, 0xe587);
+        MP_WritePhyUshort(sc, 0x14, 0xeaae);
+        MP_WritePhyUshort(sc, 0x14, 0x06bf);
+        MP_WritePhyUshort(sc, 0x14, 0x8745);
+        MP_WritePhyUshort(sc, 0x14, 0x024a);
+        MP_WritePhyUshort(sc, 0x14, 0x5fe2);
+        MP_WritePhyUshort(sc, 0x14, 0x87f7);
+        MP_WritePhyUshort(sc, 0x14, 0xf636);
+        MP_WritePhyUshort(sc, 0x14, 0xe687);
+        MP_WritePhyUshort(sc, 0x14, 0xf7ff);
+        MP_WritePhyUshort(sc, 0x14, 0xef97);
+        MP_WritePhyUshort(sc, 0x14, 0xfffe);
+        MP_WritePhyUshort(sc, 0x14, 0xfdfc);
+        MP_WritePhyUshort(sc, 0x14, 0x04f8);
+        MP_WritePhyUshort(sc, 0x14, 0xf9fa);
+        MP_WritePhyUshort(sc, 0x14, 0xef69);
+        MP_WritePhyUshort(sc, 0x14, 0xbf87);
+        MP_WritePhyUshort(sc, 0x14, 0x3f02);
+        MP_WritePhyUshort(sc, 0x14, 0x44dc);
+        MP_WritePhyUshort(sc, 0x14, 0xad28);
+        MP_WritePhyUshort(sc, 0x14, 0x29bf);
+        MP_WritePhyUshort(sc, 0x14, 0x873c);
+        MP_WritePhyUshort(sc, 0x14, 0x0244);
+        MP_WritePhyUshort(sc, 0x14, 0xdcef);
+        MP_WritePhyUshort(sc, 0x14, 0x54bf);
+        MP_WritePhyUshort(sc, 0x14, 0x8739);
+        MP_WritePhyUshort(sc, 0x14, 0x0244);
+        MP_WritePhyUshort(sc, 0x14, 0xdcac);
+        MP_WritePhyUshort(sc, 0x14, 0x290d);
+        MP_WritePhyUshort(sc, 0x14, 0xac28);
+        MP_WritePhyUshort(sc, 0x14, 0x05a3);
+        MP_WritePhyUshort(sc, 0x14, 0x020c);
+        MP_WritePhyUshort(sc, 0x14, 0xae10);
+        MP_WritePhyUshort(sc, 0x14, 0xa303);
+        MP_WritePhyUshort(sc, 0x14, 0x07ae);
+        MP_WritePhyUshort(sc, 0x14, 0x0ba3);
+        MP_WritePhyUshort(sc, 0x14, 0x0402);
+        MP_WritePhyUshort(sc, 0x14, 0xae06);
+        MP_WritePhyUshort(sc, 0x14, 0xbf87);
+        MP_WritePhyUshort(sc, 0x14, 0x4502);
+        MP_WritePhyUshort(sc, 0x14, 0x4a5f);
+        MP_WritePhyUshort(sc, 0x14, 0xef96);
+        MP_WritePhyUshort(sc, 0x14, 0xfefd);
+        MP_WritePhyUshort(sc, 0x14, 0xfc04);
+        MP_WritePhyUshort(sc, 0x14, 0xf8f9);
+        MP_WritePhyUshort(sc, 0x14, 0xfafb);
+        MP_WritePhyUshort(sc, 0x14, 0xef69);
+        MP_WritePhyUshort(sc, 0x14, 0xfae0);
+        MP_WritePhyUshort(sc, 0x14, 0x8015);
+        MP_WritePhyUshort(sc, 0x14, 0xad25);
+        MP_WritePhyUshort(sc, 0x14, 0x41d2);
+        MP_WritePhyUshort(sc, 0x14, 0x0002);
+        MP_WritePhyUshort(sc, 0x14, 0x86ed);
+        MP_WritePhyUshort(sc, 0x14, 0xe087);
+        MP_WritePhyUshort(sc, 0x14, 0xebe1);
+        MP_WritePhyUshort(sc, 0x14, 0x87ec);
+        MP_WritePhyUshort(sc, 0x14, 0x1b46);
+        MP_WritePhyUshort(sc, 0x14, 0xab26);
+        MP_WritePhyUshort(sc, 0x14, 0xd40b);
+        MP_WritePhyUshort(sc, 0x14, 0xff1b);
+        MP_WritePhyUshort(sc, 0x14, 0x46aa);
+        MP_WritePhyUshort(sc, 0x14, 0x1fac);
+        MP_WritePhyUshort(sc, 0x14, 0x3204);
+        MP_WritePhyUshort(sc, 0x14, 0xef32);
+        MP_WritePhyUshort(sc, 0x14, 0xae02);
+        MP_WritePhyUshort(sc, 0x14, 0xd304);
+        MP_WritePhyUshort(sc, 0x14, 0x0c31);
+        MP_WritePhyUshort(sc, 0x14, 0xbf87);
+        MP_WritePhyUshort(sc, 0x14, 0xeb1a);
+        MP_WritePhyUshort(sc, 0x14, 0x93d8);
+        MP_WritePhyUshort(sc, 0x14, 0x19d9);
+        MP_WritePhyUshort(sc, 0x14, 0x1b46);
+        MP_WritePhyUshort(sc, 0x14, 0xab0e);
+        MP_WritePhyUshort(sc, 0x14, 0x19d8);
+        MP_WritePhyUshort(sc, 0x14, 0x19d9);
+        MP_WritePhyUshort(sc, 0x14, 0x1b46);
+        MP_WritePhyUshort(sc, 0x14, 0xaa06);
+        MP_WritePhyUshort(sc, 0x14, 0x12a2);
+        MP_WritePhyUshort(sc, 0x14, 0x08c9);
+        MP_WritePhyUshort(sc, 0x14, 0xae06);
+        MP_WritePhyUshort(sc, 0x14, 0xbf87);
+        MP_WritePhyUshort(sc, 0x14, 0x4202);
+        MP_WritePhyUshort(sc, 0x14, 0x4a5f);
+        MP_WritePhyUshort(sc, 0x14, 0xfeef);
+        MP_WritePhyUshort(sc, 0x14, 0x96ff);
+        MP_WritePhyUshort(sc, 0x14, 0xfefd);
+        MP_WritePhyUshort(sc, 0x14, 0xfc04);
+        MP_WritePhyUshort(sc, 0x14, 0xf8fb);
+        MP_WritePhyUshort(sc, 0x14, 0xef79);
+        MP_WritePhyUshort(sc, 0x14, 0xa200);
+        MP_WritePhyUshort(sc, 0x14, 0x05bf);
+        MP_WritePhyUshort(sc, 0x14, 0x8748);
+        MP_WritePhyUshort(sc, 0x14, 0xae33);
+        MP_WritePhyUshort(sc, 0x14, 0xa201);
+        MP_WritePhyUshort(sc, 0x14, 0x05bf);
+        MP_WritePhyUshort(sc, 0x14, 0x874b);
+        MP_WritePhyUshort(sc, 0x14, 0xae2b);
+        MP_WritePhyUshort(sc, 0x14, 0xa202);
+        MP_WritePhyUshort(sc, 0x14, 0x05bf);
+        MP_WritePhyUshort(sc, 0x14, 0x874e);
+        MP_WritePhyUshort(sc, 0x14, 0xae23);
+        MP_WritePhyUshort(sc, 0x14, 0xa203);
+        MP_WritePhyUshort(sc, 0x14, 0x05bf);
+        MP_WritePhyUshort(sc, 0x14, 0x8751);
+        MP_WritePhyUshort(sc, 0x14, 0xae1b);
+        MP_WritePhyUshort(sc, 0x14, 0xa204);
+        MP_WritePhyUshort(sc, 0x14, 0x05bf);
+        MP_WritePhyUshort(sc, 0x14, 0x8754);
+        MP_WritePhyUshort(sc, 0x14, 0xae13);
+        MP_WritePhyUshort(sc, 0x14, 0xa205);
+        MP_WritePhyUshort(sc, 0x14, 0x05bf);
+        MP_WritePhyUshort(sc, 0x14, 0x8757);
+        MP_WritePhyUshort(sc, 0x14, 0xae0b);
+        MP_WritePhyUshort(sc, 0x14, 0xa206);
+        MP_WritePhyUshort(sc, 0x14, 0x05bf);
+        MP_WritePhyUshort(sc, 0x14, 0x875a);
+        MP_WritePhyUshort(sc, 0x14, 0xae03);
+        MP_WritePhyUshort(sc, 0x14, 0xbf87);
+        MP_WritePhyUshort(sc, 0x14, 0x5d02);
+        MP_WritePhyUshort(sc, 0x14, 0x44dc);
+        MP_WritePhyUshort(sc, 0x14, 0xef64);
+        MP_WritePhyUshort(sc, 0x14, 0xef97);
+        MP_WritePhyUshort(sc, 0x14, 0xfffc);
+        MP_WritePhyUshort(sc, 0x14, 0x04af);
+        MP_WritePhyUshort(sc, 0x14, 0x00ed);
+        MP_WritePhyUshort(sc, 0x14, 0x54a4);
+        MP_WritePhyUshort(sc, 0x14, 0x3474);
+        MP_WritePhyUshort(sc, 0x14, 0xa600);
+        MP_WritePhyUshort(sc, 0x14, 0x22a4);
+        MP_WritePhyUshort(sc, 0x14, 0x3411);
+        MP_WritePhyUshort(sc, 0x14, 0xb842);
+        MP_WritePhyUshort(sc, 0x14, 0x22b8);
+        MP_WritePhyUshort(sc, 0x14, 0x42f0);
+        MP_WritePhyUshort(sc, 0x14, 0xa200);
+        MP_WritePhyUshort(sc, 0x14, 0xf0a2);
+        MP_WritePhyUshort(sc, 0x14, 0x02f0);
+        MP_WritePhyUshort(sc, 0x14, 0xa204);
+        MP_WritePhyUshort(sc, 0x14, 0xf0a2);
+        MP_WritePhyUshort(sc, 0x14, 0x06f0);
+        MP_WritePhyUshort(sc, 0x14, 0xa208);
+        MP_WritePhyUshort(sc, 0x14, 0xf0a2);
+        MP_WritePhyUshort(sc, 0x14, 0x0af0);
+        MP_WritePhyUshort(sc, 0x14, 0xa20c);
+        MP_WritePhyUshort(sc, 0x14, 0xf0a2);
+        MP_WritePhyUshort(sc, 0x14, 0x0e55);
+        MP_WritePhyUshort(sc, 0x14, 0xb820);
+        MP_WritePhyUshort(sc, 0x14, 0xd9c6);
+        MP_WritePhyUshort(sc, 0x14, 0x08aa);
+        MP_WritePhyUshort(sc, 0x14, 0xc430);
+        MP_WritePhyUshort(sc, 0x14, 0x00c6);
+        MP_WritePhyUshort(sc, 0x14, 0x1433);
+        MP_WritePhyUshort(sc, 0x14, 0xc41a);
+        MP_WritePhyUshort(sc, 0x14, 0x88c4);
+        MP_WritePhyUshort(sc, 0x14, 0x2e22);
+        MP_WritePhyUshort(sc, 0x14, 0xc42e);
+        MP_WritePhyUshort(sc, 0x14, 0x54c4);
+        MP_WritePhyUshort(sc, 0x14, 0x1a00);
+        MP_WritePhyUshort(sc, 0x13, 0xb818);
+        MP_WritePhyUshort(sc, 0x14, 0x1a01);
+        MP_WritePhyUshort(sc, 0x13, 0xb81a);
+        MP_WritePhyUshort(sc, 0x14, 0x020b);
+        MP_WritePhyUshort(sc, 0x13, 0xb81c);
+        MP_WritePhyUshort(sc, 0x14, 0x03ce);
+        MP_WritePhyUshort(sc, 0x13, 0xb81e);
+        MP_WritePhyUshort(sc, 0x14, 0x00e7);
+        MP_WritePhyUshort(sc, 0x13, 0xb846);
+        MP_WritePhyUshort(sc, 0x14, 0xffff);
+        MP_WritePhyUshort(sc, 0x13, 0xb848);
+        MP_WritePhyUshort(sc, 0x14, 0xffff);
+        MP_WritePhyUshort(sc, 0x13, 0xb84a);
+        MP_WritePhyUshort(sc, 0x14, 0xffff);
+        MP_WritePhyUshort(sc, 0x13, 0xb84c);
+        MP_WritePhyUshort(sc, 0x14, 0xffff);
+        MP_WritePhyUshort(sc, 0x13, 0xb832);
+        MP_WritePhyUshort(sc, 0x14, 0x000f);
+
+        MP_WritePhyUshort(sc, 0x1F, 0x0A43);
+        MP_WritePhyUshort(sc, 0x13, 0x0000);
+        MP_WritePhyUshort(sc, 0x14, 0x0000);
+        MP_WritePhyUshort(sc, 0x1f, 0x0B82);
+        PhyRegValue = MP_ReadPhyUshort(sc, 0x17);
+        PhyRegValue &= ~(BIT_0);
+        MP_WritePhyUshort(sc, 0x17, PhyRegValue);
+        MP_WritePhyUshort(sc, 0x1f, 0x0A43);
+        MP_WritePhyUshort(sc, 0x13, 0x8042);
+        MP_WritePhyUshort(sc, 0x14, 0x0000);
+
+        re_clear_phy_mcu_patch_request(sc);
+        if (sc->RequiredSecLanDonglePatch) {
+                MP_WritePhyUshort(sc, 0x1F, 0x0A43);
+                PhyRegValue = MP_ReadPhyUshort(sc, 0x11);
+                PhyRegValue &= ~(BIT_6);
+                MP_WritePhyUshort(sc, 0x11, PhyRegValue);
+        }
+}
+
 static void re_set_phy_mcu_8168ep_1(struct re_softc *sc)
 {
         u_int16_t PhyRegValue;
@@ -24568,166 +23873,262 @@ static const u_int16_t phy_mcu_ram_code_8125b_2[] = {
         0xa436, 0x8024, 0xa438, 0x3701, 0xa436, 0xB82E, 0xa438, 0x0001,
         0xb820, 0x0090, 0xa436, 0xA016, 0xa438, 0x0000, 0xa436, 0xA012,
         0xa438, 0x0000, 0xa436, 0xA014, 0xa438, 0x1800, 0xa438, 0x8010,
-        0xa438, 0x1800, 0xa438, 0x801a, 0xa438, 0x1800, 0xa438, 0x8024,
-        0xa438, 0x1800, 0xa438, 0x802f, 0xa438, 0x1800, 0xa438, 0x8051,
-        0xa438, 0x1800, 0xa438, 0x8057, 0xa438, 0x1800, 0xa438, 0x8063,
-        0xa438, 0x1800, 0xa438, 0x8068, 0xa438, 0xd093, 0xa438, 0xd1c4,
+        0xa438, 0x1800, 0xa438, 0x801a, 0xa438, 0x1800, 0xa438, 0x803f,
+        0xa438, 0x1800, 0xa438, 0x8045, 0xa438, 0x1800, 0xa438, 0x8067,
+        0xa438, 0x1800, 0xa438, 0x806d, 0xa438, 0x1800, 0xa438, 0x8071,
+        0xa438, 0x1800, 0xa438, 0x80b1, 0xa438, 0xd093, 0xa438, 0xd1c4,
         0xa438, 0x1000, 0xa438, 0x135c, 0xa438, 0xd704, 0xa438, 0x5fbc,
         0xa438, 0xd504, 0xa438, 0xc9f1, 0xa438, 0x1800, 0xa438, 0x0fc9,
         0xa438, 0xbb50, 0xa438, 0xd505, 0xa438, 0xa202, 0xa438, 0xd504,
         0xa438, 0x8c0f, 0xa438, 0xd500, 0xa438, 0x1000, 0xa438, 0x1519,
-        0xa438, 0x1800, 0xa438, 0x1548, 0xa438, 0x2f70, 0xa438, 0x802a,
-        0xa438, 0x2f73, 0xa438, 0x156a, 0xa438, 0x1800, 0xa438, 0x155c,
-        0xa438, 0xd505, 0xa438, 0xa202, 0xa438, 0xd500, 0xa438, 0x1800,
-        0xa438, 0x1551, 0xa438, 0xc0c1, 0xa438, 0xc0c0, 0xa438, 0xd05a,
-        0xa438, 0xd1ba, 0xa438, 0xd701, 0xa438, 0x2529, 0xa438, 0x022a,
-        0xa438, 0xd0a7, 0xa438, 0xd1b9, 0xa438, 0xa208, 0xa438, 0x1000,
-        0xa438, 0x080e, 0xa438, 0xd701, 0xa438, 0x408b, 0xa438, 0x1000,
-        0xa438, 0x0a65, 0xa438, 0xf003, 0xa438, 0x1000, 0xa438, 0x0a6b,
-        0xa438, 0xd701, 0xa438, 0x1000, 0xa438, 0x0920, 0xa438, 0x1000,
-        0xa438, 0x0915, 0xa438, 0x1000, 0xa438, 0x0909, 0xa438, 0x228f,
-        0xa438, 0x8038, 0xa438, 0x9801, 0xa438, 0xd71e, 0xa438, 0x5d61,
-        0xa438, 0xd701, 0xa438, 0x1800, 0xa438, 0x022a, 0xa438, 0x2005,
-        0xa438, 0x091a, 0xa438, 0x3bd9, 0xa438, 0x0919, 0xa438, 0x1800,
-        0xa438, 0x0916, 0xa438, 0x1000, 0xa438, 0x14c5, 0xa438, 0xd703,
-        0xa438, 0x3181, 0xa438, 0x8061, 0xa438, 0x60ad, 0xa438, 0x1000,
-        0xa438, 0x135c, 0xa438, 0xd703, 0xa438, 0x5fba, 0xa438, 0x1800,
-        0xa438, 0x0cc7, 0xa438, 0xd096, 0xa438, 0xd1a9, 0xa438, 0xd503,
-        0xa438, 0x1800, 0xa438, 0x0c94, 0xa436, 0xA026, 0xa438, 0xffff,
-        0xa436, 0xA024, 0xa438, 0x0c93, 0xa436, 0xA022, 0xa438, 0x0cc5,
-        0xa436, 0xA020, 0xa438, 0x0915, 0xa436, 0xA006, 0xa438, 0x020a,
-        0xa436, 0xA004, 0xa438, 0x155b, 0xa436, 0xA002, 0xa438, 0x1542,
-        0xa436, 0xA000, 0xa438, 0x0fc7, 0xa436, 0xA008, 0xa438, 0x7f00,
-        0xa436, 0xA016, 0xa438, 0x0010, 0xa436, 0xA012, 0xa438, 0x0000,
-        0xa436, 0xA014, 0xa438, 0x1800, 0xa438, 0x8010, 0xa438, 0x1800,
-        0xa438, 0x801d, 0xa438, 0x1800, 0xa438, 0x802c, 0xa438, 0x1800,
-        0xa438, 0x802c, 0xa438, 0x1800, 0xa438, 0x802c, 0xa438, 0x1800,
-        0xa438, 0x802c, 0xa438, 0x1800, 0xa438, 0x802c, 0xa438, 0x1800,
-        0xa438, 0x802c, 0xa438, 0xd700, 0xa438, 0x6090, 0xa438, 0x60d1,
-        0xa438, 0xc95c, 0xa438, 0xf007, 0xa438, 0x60b1, 0xa438, 0xc95a,
-        0xa438, 0xf004, 0xa438, 0xc956, 0xa438, 0xf002, 0xa438, 0xc94e,
-        0xa438, 0x1800, 0xa438, 0x00cd, 0xa438, 0xd700, 0xa438, 0x6090,
+        0xa438, 0x1000, 0xa438, 0x135c, 0xa438, 0xd75e, 0xa438, 0x5fae,
+        0xa438, 0x9b50, 0xa438, 0x1000, 0xa438, 0x135c, 0xa438, 0xd75e,
+        0xa438, 0x7fae, 0xa438, 0x1000, 0xa438, 0x135c, 0xa438, 0xd707,
+        0xa438, 0x40a7, 0xa438, 0xd719, 0xa438, 0x4071, 0xa438, 0x1800,
+        0xa438, 0x1557, 0xa438, 0xd719, 0xa438, 0x2f70, 0xa438, 0x803b,
+        0xa438, 0x2f73, 0xa438, 0x156a, 0xa438, 0x5e70, 0xa438, 0x1800,
+        0xa438, 0x155d, 0xa438, 0xd505, 0xa438, 0xa202, 0xa438, 0xd500,
+        0xa438, 0xffed, 0xa438, 0xd709, 0xa438, 0x4054, 0xa438, 0xa788,
+        0xa438, 0xd70b, 0xa438, 0x1800, 0xa438, 0x172a, 0xa438, 0xc0c1,
+        0xa438, 0xc0c0, 0xa438, 0xd05a, 0xa438, 0xd1ba, 0xa438, 0xd701,
+        0xa438, 0x2529, 0xa438, 0x022a, 0xa438, 0xd0a7, 0xa438, 0xd1b9,
+        0xa438, 0xa208, 0xa438, 0x1000, 0xa438, 0x080e, 0xa438, 0xd701,
+        0xa438, 0x408b, 0xa438, 0x1000, 0xa438, 0x0a65, 0xa438, 0xf003,
+        0xa438, 0x1000, 0xa438, 0x0a6b, 0xa438, 0xd701, 0xa438, 0x1000,
+        0xa438, 0x0920, 0xa438, 0x1000, 0xa438, 0x0915, 0xa438, 0x1000,
+        0xa438, 0x0909, 0xa438, 0x228f, 0xa438, 0x804e, 0xa438, 0x9801,
+        0xa438, 0xd71e, 0xa438, 0x5d61, 0xa438, 0xd701, 0xa438, 0x1800,
+        0xa438, 0x022a, 0xa438, 0x2005, 0xa438, 0x091a, 0xa438, 0x3bd9,
+        0xa438, 0x0919, 0xa438, 0x1800, 0xa438, 0x0916, 0xa438, 0xd090,
+        0xa438, 0xd1c9, 0xa438, 0x1800, 0xa438, 0x1064, 0xa438, 0xd096,
+        0xa438, 0xd1a9, 0xa438, 0xd503, 0xa438, 0xa104, 0xa438, 0x0c07,
+        0xa438, 0x0902, 0xa438, 0xd500, 0xa438, 0xbc10, 0xa438, 0xd501,
+        0xa438, 0xce01, 0xa438, 0xa201, 0xa438, 0x8201, 0xa438, 0xce00,
+        0xa438, 0xd500, 0xa438, 0xc484, 0xa438, 0xd503, 0xa438, 0xcc02,
+        0xa438, 0xcd0d, 0xa438, 0xaf01, 0xa438, 0xd500, 0xa438, 0xd703,
+        0xa438, 0x4371, 0xa438, 0xbd08, 0xa438, 0x1000, 0xa438, 0x135c,
+        0xa438, 0xd75e, 0xa438, 0x5fb3, 0xa438, 0xd503, 0xa438, 0xd0f5,
+        0xa438, 0xd1c6, 0xa438, 0x0cf0, 0xa438, 0x0e50, 0xa438, 0xd704,
+        0xa438, 0x401c, 0xa438, 0xd0f5, 0xa438, 0xd1c6, 0xa438, 0x0cf0,
+        0xa438, 0x0ea0, 0xa438, 0x401c, 0xa438, 0xd07b, 0xa438, 0xd1c5,
+        0xa438, 0x8ef0, 0xa438, 0x401c, 0xa438, 0x9d08, 0xa438, 0x1000,
+        0xa438, 0x135c, 0xa438, 0xd75e, 0xa438, 0x7fb3, 0xa438, 0x1000,
+        0xa438, 0x135c, 0xa438, 0xd75e, 0xa438, 0x5fad, 0xa438, 0x1000,
+        0xa438, 0x14c5, 0xa438, 0xd703, 0xa438, 0x3181, 0xa438, 0x80af,
+        0xa438, 0x60ad, 0xa438, 0x1000, 0xa438, 0x135c, 0xa438, 0xd703,
+        0xa438, 0x5fba, 0xa438, 0x1800, 0xa438, 0x0cc7, 0xa438, 0xa802,
+        0xa438, 0xa301, 0xa438, 0xa801, 0xa438, 0xc004, 0xa438, 0xd710,
+        0xa438, 0x4000, 0xa438, 0x1800, 0xa438, 0x1e79, 0xa436, 0xA026,
+        0xa438, 0x1e78, 0xa436, 0xA024, 0xa438, 0x0c93, 0xa436, 0xA022,
+        0xa438, 0x1062, 0xa436, 0xA020, 0xa438, 0x0915, 0xa436, 0xA006,
+        0xa438, 0x020a, 0xa436, 0xA004, 0xa438, 0x1726, 0xa436, 0xA002,
+        0xa438, 0x1542, 0xa436, 0xA000, 0xa438, 0x0fc7, 0xa436, 0xA008,
+        0xa438, 0xff00, 0xa436, 0xA016, 0xa438, 0x0010, 0xa436, 0xA012,
+        0xa438, 0x0000, 0xa436, 0xA014, 0xa438, 0x1800, 0xa438, 0x8010,
+        0xa438, 0x1800, 0xa438, 0x801d, 0xa438, 0x1800, 0xa438, 0x802c,
+        0xa438, 0x1800, 0xa438, 0x802c, 0xa438, 0x1800, 0xa438, 0x802c,
+        0xa438, 0x1800, 0xa438, 0x802c, 0xa438, 0x1800, 0xa438, 0x802c,
+        0xa438, 0x1800, 0xa438, 0x802c, 0xa438, 0xd700, 0xa438, 0x6090,
         0xa438, 0x60d1, 0xa438, 0xc95c, 0xa438, 0xf007, 0xa438, 0x60b1,
         0xa438, 0xc95a, 0xa438, 0xf004, 0xa438, 0xc956, 0xa438, 0xf002,
-        0xa438, 0xc94e, 0xa438, 0x1000, 0xa438, 0x022a, 0xa438, 0x1800,
-        0xa438, 0x0132, 0xa436, 0xA08E, 0xa438, 0xffff, 0xa436, 0xA08C,
-        0xa438, 0xffff, 0xa436, 0xA08A, 0xa438, 0xffff, 0xa436, 0xA088,
-        0xa438, 0xffff, 0xa436, 0xA086, 0xa438, 0xffff, 0xa436, 0xA084,
-        0xa438, 0xffff, 0xa436, 0xA082, 0xa438, 0x012f, 0xa436, 0xA080,
-        0xa438, 0x00cc, 0xa436, 0xA090, 0xa438, 0x0103, 0xa436, 0xA016,
-        0xa438, 0x0020, 0xa436, 0xA012, 0xa438, 0x0000, 0xa436, 0xA014,
-        0xa438, 0x1800, 0xa438, 0x8010, 0xa438, 0x1800, 0xa438, 0x8020,
-        0xa438, 0x1800, 0xa438, 0x802a, 0xa438, 0x1800, 0xa438, 0x8035,
-        0xa438, 0x1800, 0xa438, 0x803c, 0xa438, 0x1800, 0xa438, 0x803c,
-        0xa438, 0x1800, 0xa438, 0x803c, 0xa438, 0x1800, 0xa438, 0x803c,
-        0xa438, 0xd107, 0xa438, 0xd042, 0xa438, 0xa404, 0xa438, 0x1000,
-        0xa438, 0x09df, 0xa438, 0xd700, 0xa438, 0x5fb4, 0xa438, 0x8280,
-        0xa438, 0xd700, 0xa438, 0x6065, 0xa438, 0xd125, 0xa438, 0xf002,
-        0xa438, 0xd12b, 0xa438, 0xd040, 0xa438, 0x1800, 0xa438, 0x077f,
-        0xa438, 0x0cf0, 0xa438, 0x0c50, 0xa438, 0xd104, 0xa438, 0xd040,
-        0xa438, 0x1000, 0xa438, 0x0aa8, 0xa438, 0xd700, 0xa438, 0x5fb4,
-        0xa438, 0x1800, 0xa438, 0x0a2e, 0xa438, 0xcb9b, 0xa438, 0xd110,
-        0xa438, 0xd040, 0xa438, 0x1000, 0xa438, 0x0b7b, 0xa438, 0x1000,
-        0xa438, 0x09df, 0xa438, 0xd700, 0xa438, 0x5fb4, 0xa438, 0x1800,
-        0xa438, 0x081b, 0xa438, 0x1000, 0xa438, 0x09df, 0xa438, 0xd704,
-        0xa438, 0x7fb8, 0xa438, 0xa718, 0xa438, 0x1800, 0xa438, 0x074e,
-        0xa436, 0xA10E, 0xa438, 0xffff, 0xa436, 0xA10C, 0xa438, 0xffff,
-        0xa436, 0xA10A, 0xa438, 0xffff, 0xa436, 0xA108, 0xa438, 0xffff,
-        0xa436, 0xA106, 0xa438, 0x074d, 0xa436, 0xA104, 0xa438, 0x0818,
-        0xa436, 0xA102, 0xa438, 0x0a2c, 0xa436, 0xA100, 0xa438, 0x077e,
-        0xa436, 0xA110, 0xa438, 0x000f, 0xa436, 0xb87c, 0xa438, 0x8625,
-        0xa436, 0xb87e, 0xa438, 0xaf86, 0xa438, 0x3daf, 0xa438, 0x8689,
-        0xa438, 0xaf88, 0xa438, 0x69af, 0xa438, 0x8887, 0xa438, 0xaf88,
-        0xa438, 0x9caf, 0xa438, 0x889c, 0xa438, 0xaf88, 0xa438, 0x9caf,
-        0xa438, 0x889c, 0xa438, 0xbf86, 0xa438, 0x49d7, 0xa438, 0x0040,
-        0xa438, 0x0277, 0xa438, 0x7daf, 0xa438, 0x2727, 0xa438, 0x0000,
-        0xa438, 0x7205, 0xa438, 0x0000, 0xa438, 0x7208, 0xa438, 0x0000,
-        0xa438, 0x71f3, 0xa438, 0x0000, 0xa438, 0x71f6, 0xa438, 0x0000,
-        0xa438, 0x7229, 0xa438, 0x0000, 0xa438, 0x722c, 0xa438, 0x0000,
-        0xa438, 0x7217, 0xa438, 0x0000, 0xa438, 0x721a, 0xa438, 0x0000,
-        0xa438, 0x721d, 0xa438, 0x0000, 0xa438, 0x7211, 0xa438, 0x0000,
-        0xa438, 0x7220, 0xa438, 0x0000, 0xa438, 0x7214, 0xa438, 0x0000,
-        0xa438, 0x722f, 0xa438, 0x0000, 0xa438, 0x7223, 0xa438, 0x0000,
-        0xa438, 0x7232, 0xa438, 0x0000, 0xa438, 0x7226, 0xa438, 0xf8f9,
-        0xa438, 0xfae0, 0xa438, 0x85b3, 0xa438, 0x3802, 0xa438, 0xad27,
-        0xa438, 0x02ae, 0xa438, 0x03af, 0xa438, 0x8830, 0xa438, 0x1f66,
-        0xa438, 0xef65, 0xa438, 0xbfc2, 0xa438, 0x1f1a, 0xa438, 0x96f7,
-        0xa438, 0x05ee, 0xa438, 0xffd2, 0xa438, 0x00da, 0xa438, 0xf605,
-        0xa438, 0xbfc2, 0xa438, 0x2f1a, 0xa438, 0x96f7, 0xa438, 0x05ee,
-        0xa438, 0xffd2, 0xa438, 0x00db, 0xa438, 0xf605, 0xa438, 0xef02,
-        0xa438, 0x1f11, 0xa438, 0x0d42, 0xa438, 0xbf88, 0xa438, 0x4202,
-        0xa438, 0x6e7d, 0xa438, 0xef02, 0xa438, 0x1b03, 0xa438, 0x1f11,
-        0xa438, 0x0d42, 0xa438, 0xbf88, 0xa438, 0x4502, 0xa438, 0x6e7d,
-        0xa438, 0xef02, 0xa438, 0x1a03, 0xa438, 0x1f11, 0xa438, 0x0d42,
-        0xa438, 0xbf88, 0xa438, 0x4802, 0xa438, 0x6e7d, 0xa438, 0xbfc2,
-        0xa438, 0x3f1a, 0xa438, 0x96f7, 0xa438, 0x05ee, 0xa438, 0xffd2,
-        0xa438, 0x00da, 0xa438, 0xf605, 0xa438, 0xbfc2, 0xa438, 0x4f1a,
-        0xa438, 0x96f7, 0xa438, 0x05ee, 0xa438, 0xffd2, 0xa438, 0x00db,
-        0xa438, 0xf605, 0xa438, 0xef02, 0xa438, 0x1f11, 0xa438, 0x0d42,
-        0xa438, 0xbf88, 0xa438, 0x4b02, 0xa438, 0x6e7d, 0xa438, 0xef02,
-        0xa438, 0x1b03, 0xa438, 0x1f11, 0xa438, 0x0d42, 0xa438, 0xbf88,
-        0xa438, 0x4e02, 0xa438, 0x6e7d, 0xa438, 0xef02, 0xa438, 0x1a03,
-        0xa438, 0x1f11, 0xa438, 0x0d42, 0xa438, 0xbf88, 0xa438, 0x5102,
-        0xa438, 0x6e7d, 0xa438, 0xef56, 0xa438, 0xd020, 0xa438, 0x1f11,
-        0xa438, 0xbf88, 0xa438, 0x5402, 0xa438, 0x6e7d, 0xa438, 0xbf88,
-        0xa438, 0x5702, 0xa438, 0x6e7d, 0xa438, 0xbf88, 0xa438, 0x5a02,
-        0xa438, 0x6e7d, 0xa438, 0xe185, 0xa438, 0xa0ef, 0xa438, 0x0348,
-        0xa438, 0x0a28, 0xa438, 0x05ef, 0xa438, 0x201b, 0xa438, 0x01ad,
-        0xa438, 0x2735, 0xa438, 0x1f44, 0xa438, 0xe085, 0xa438, 0x88e1,
-        0xa438, 0x8589, 0xa438, 0xbf88, 0xa438, 0x5d02, 0xa438, 0x6e7d,
-        0xa438, 0xe085, 0xa438, 0x8ee1, 0xa438, 0x858f, 0xa438, 0xbf88,
-        0xa438, 0x6002, 0xa438, 0x6e7d, 0xa438, 0xe085, 0xa438, 0x94e1,
-        0xa438, 0x8595, 0xa438, 0xbf88, 0xa438, 0x6302, 0xa438, 0x6e7d,
-        0xa438, 0xe085, 0xa438, 0x9ae1, 0xa438, 0x859b, 0xa438, 0xbf88,
-        0xa438, 0x6602, 0xa438, 0x6e7d, 0xa438, 0xaf88, 0xa438, 0x3cbf,
-        0xa438, 0x883f, 0xa438, 0x026e, 0xa438, 0x9cad, 0xa438, 0x2835,
-        0xa438, 0x1f44, 0xa438, 0xe08f, 0xa438, 0xf8e1, 0xa438, 0x8ff9,
-        0xa438, 0xbf88, 0xa438, 0x5d02, 0xa438, 0x6e7d, 0xa438, 0xe08f,
-        0xa438, 0xfae1, 0xa438, 0x8ffb, 0xa438, 0xbf88, 0xa438, 0x6002,
-        0xa438, 0x6e7d, 0xa438, 0xe08f, 0xa438, 0xfce1, 0xa438, 0x8ffd,
-        0xa438, 0xbf88, 0xa438, 0x6302, 0xa438, 0x6e7d, 0xa438, 0xe08f,
-        0xa438, 0xfee1, 0xa438, 0x8fff, 0xa438, 0xbf88, 0xa438, 0x6602,
-        0xa438, 0x6e7d, 0xa438, 0xaf88, 0xa438, 0x3ce1, 0xa438, 0x85a1,
-        0xa438, 0x1b21, 0xa438, 0xad37, 0xa438, 0x341f, 0xa438, 0x44e0,
-        0xa438, 0x858a, 0xa438, 0xe185, 0xa438, 0x8bbf, 0xa438, 0x885d,
-        0xa438, 0x026e, 0xa438, 0x7de0, 0xa438, 0x8590, 0xa438, 0xe185,
-        0xa438, 0x91bf, 0xa438, 0x8860, 0xa438, 0x026e, 0xa438, 0x7de0,
-        0xa438, 0x8596, 0xa438, 0xe185, 0xa438, 0x97bf, 0xa438, 0x8863,
-        0xa438, 0x026e, 0xa438, 0x7de0, 0xa438, 0x859c, 0xa438, 0xe185,
-        0xa438, 0x9dbf, 0xa438, 0x8866, 0xa438, 0x026e, 0xa438, 0x7dae,
-        0xa438, 0x401f, 0xa438, 0x44e0, 0xa438, 0x858c, 0xa438, 0xe185,
-        0xa438, 0x8dbf, 0xa438, 0x885d, 0xa438, 0x026e, 0xa438, 0x7de0,
-        0xa438, 0x8592, 0xa438, 0xe185, 0xa438, 0x93bf, 0xa438, 0x8860,
-        0xa438, 0x026e, 0xa438, 0x7de0, 0xa438, 0x8598, 0xa438, 0xe185,
-        0xa438, 0x99bf, 0xa438, 0x8863, 0xa438, 0x026e, 0xa438, 0x7de0,
-        0xa438, 0x859e, 0xa438, 0xe185, 0xa438, 0x9fbf, 0xa438, 0x8866,
-        0xa438, 0x026e, 0xa438, 0x7dae, 0xa438, 0x0ce1, 0xa438, 0x85b3,
-        0xa438, 0x3904, 0xa438, 0xac2f, 0xa438, 0x04ee, 0xa438, 0x85b3,
-        0xa438, 0x00af, 0xa438, 0x39d9, 0xa438, 0x22ac, 0xa438, 0xeaf0,
-        0xa438, 0xacf6, 0xa438, 0xf0ac, 0xa438, 0xfaf0, 0xa438, 0xacf8,
-        0xa438, 0xf0ac, 0xa438, 0xfcf0, 0xa438, 0xad00, 0xa438, 0xf0ac,
-        0xa438, 0xfef0, 0xa438, 0xacf0, 0xa438, 0xf0ac, 0xa438, 0xf4f0,
-        0xa438, 0xacf2, 0xa438, 0xf0ac, 0xa438, 0xb0f0, 0xa438, 0xacae,
-        0xa438, 0xf0ac, 0xa438, 0xacf0, 0xa438, 0xacaa, 0xa438, 0xa100,
-        0xa438, 0x0ce1, 0xa438, 0x8ff7, 0xa438, 0xbf88, 0xa438, 0x8402,
-        0xa438, 0x6e7d, 0xa438, 0xaf26, 0xa438, 0xe9e1, 0xa438, 0x8ff6,
-        0xa438, 0xbf88, 0xa438, 0x8402, 0xa438, 0x6e7d, 0xa438, 0xaf26,
-        0xa438, 0xf520, 0xa438, 0xac86, 0xa438, 0xbf88, 0xa438, 0x3f02,
-        0xa438, 0x6e9c, 0xa438, 0xad28, 0xa438, 0x03af, 0xa438, 0x3324,
-        0xa438, 0xad38, 0xa438, 0x03af, 0xa438, 0x32e6, 0xa438, 0xaf32,
-        0xa438, 0xfb00, 0xa436, 0xb87c, 0xa438, 0x8ff6, 0xa436, 0xb87e,
-        0xa438, 0x0705, 0xa436, 0xb87c, 0xa438, 0x8ff8, 0xa436, 0xb87e,
-        0xa438, 0x19cc, 0xa436, 0xb87c, 0xa438, 0x8ffa, 0xa436, 0xb87e,
-        0xa438, 0x28e3, 0xa436, 0xb87c, 0xa438, 0x8ffc, 0xa436, 0xb87e,
-        0xa438, 0x1047, 0xa436, 0xb87c, 0xa438, 0x8ffe, 0xa436, 0xb87e,
-        0xa438, 0x0a45, 0xa436, 0xb85e, 0xa438, 0x271E, 0xa436, 0xb860,
-        0xa438, 0x3846, 0xa436, 0xb862, 0xa438, 0x26E6, 0xa436, 0xb864,
-        0xa438, 0x32E3, 0xa436, 0xb886, 0xa438, 0xffff, 0xa436, 0xb888,
-        0xa438, 0xffff, 0xa436, 0xb88a, 0xa438, 0xffff, 0xa436, 0xb88c,
-        0xa438, 0xffff, 0xa436, 0xb838, 0xa438, 0x000f, 0xb820, 0x0010,
-        0xa436, 0x0000, 0xa438, 0x0000, 0xa436, 0xB82E, 0xa438, 0x0000,
-        0xa436, 0x8024, 0xa438, 0x0000, 0xb820, 0x0000, 0xa436, 0x801E,
-        0xa438, 0x0016, 0xFFFF, 0xFFFF
+        0xa438, 0xc94e, 0xa438, 0x1800, 0xa438, 0x00cd, 0xa438, 0xd700,
+        0xa438, 0x6090, 0xa438, 0x60d1, 0xa438, 0xc95c, 0xa438, 0xf007,
+        0xa438, 0x60b1, 0xa438, 0xc95a, 0xa438, 0xf004, 0xa438, 0xc956,
+        0xa438, 0xf002, 0xa438, 0xc94e, 0xa438, 0x1000, 0xa438, 0x022a,
+        0xa438, 0x1800, 0xa438, 0x0132, 0xa436, 0xA08E, 0xa438, 0xffff,
+        0xa436, 0xA08C, 0xa438, 0xffff, 0xa436, 0xA08A, 0xa438, 0xffff,
+        0xa436, 0xA088, 0xa438, 0xffff, 0xa436, 0xA086, 0xa438, 0xffff,
+        0xa436, 0xA084, 0xa438, 0xffff, 0xa436, 0xA082, 0xa438, 0x012f,
+        0xa436, 0xA080, 0xa438, 0x00cc, 0xa436, 0xA090, 0xa438, 0x0103,
+        0xa436, 0xA016, 0xa438, 0x0020, 0xa436, 0xA012, 0xa438, 0x0000,
+        0xa436, 0xA014, 0xa438, 0x1800, 0xa438, 0x8010, 0xa438, 0x1800,
+        0xa438, 0x8020, 0xa438, 0x1800, 0xa438, 0x802a, 0xa438, 0x1800,
+        0xa438, 0x8035, 0xa438, 0x1800, 0xa438, 0x803c, 0xa438, 0x1800,
+        0xa438, 0x803c, 0xa438, 0x1800, 0xa438, 0x803c, 0xa438, 0x1800,
+        0xa438, 0x803c, 0xa438, 0xd107, 0xa438, 0xd042, 0xa438, 0xa404,
+        0xa438, 0x1000, 0xa438, 0x09df, 0xa438, 0xd700, 0xa438, 0x5fb4,
+        0xa438, 0x8280, 0xa438, 0xd700, 0xa438, 0x6065, 0xa438, 0xd125,
+        0xa438, 0xf002, 0xa438, 0xd12b, 0xa438, 0xd040, 0xa438, 0x1800,
+        0xa438, 0x077f, 0xa438, 0x0cf0, 0xa438, 0x0c50, 0xa438, 0xd104,
+        0xa438, 0xd040, 0xa438, 0x1000, 0xa438, 0x0aa8, 0xa438, 0xd700,
+        0xa438, 0x5fb4, 0xa438, 0x1800, 0xa438, 0x0a2e, 0xa438, 0xcb9b,
+        0xa438, 0xd110, 0xa438, 0xd040, 0xa438, 0x1000, 0xa438, 0x0b7b,
+        0xa438, 0x1000, 0xa438, 0x09df, 0xa438, 0xd700, 0xa438, 0x5fb4,
+        0xa438, 0x1800, 0xa438, 0x081b, 0xa438, 0x1000, 0xa438, 0x09df,
+        0xa438, 0xd704, 0xa438, 0x7fb8, 0xa438, 0xa718, 0xa438, 0x1800,
+        0xa438, 0x074e, 0xa436, 0xA10E, 0xa438, 0xffff, 0xa436, 0xA10C,
+        0xa438, 0xffff, 0xa436, 0xA10A, 0xa438, 0xffff, 0xa436, 0xA108,
+        0xa438, 0xffff, 0xa436, 0xA106, 0xa438, 0x074d, 0xa436, 0xA104,
+        0xa438, 0x0818, 0xa436, 0xA102, 0xa438, 0x0a2c, 0xa436, 0xA100,
+        0xa438, 0x077e, 0xa436, 0xA110, 0xa438, 0x000f, 0xa436, 0xb87c,
+        0xa438, 0x8625, 0xa436, 0xb87e, 0xa438, 0xaf86, 0xa438, 0x3daf,
+        0xa438, 0x8689, 0xa438, 0xaf88, 0xa438, 0x69af, 0xa438, 0x8887,
+        0xa438, 0xaf88, 0xa438, 0x9caf, 0xa438, 0x889c, 0xa438, 0xaf88,
+        0xa438, 0x9caf, 0xa438, 0x889c, 0xa438, 0xbf86, 0xa438, 0x49d7,
+        0xa438, 0x0040, 0xa438, 0x0277, 0xa438, 0x7daf, 0xa438, 0x2727,
+        0xa438, 0x0000, 0xa438, 0x7205, 0xa438, 0x0000, 0xa438, 0x7208,
+        0xa438, 0x0000, 0xa438, 0x71f3, 0xa438, 0x0000, 0xa438, 0x71f6,
+        0xa438, 0x0000, 0xa438, 0x7229, 0xa438, 0x0000, 0xa438, 0x722c,
+        0xa438, 0x0000, 0xa438, 0x7217, 0xa438, 0x0000, 0xa438, 0x721a,
+        0xa438, 0x0000, 0xa438, 0x721d, 0xa438, 0x0000, 0xa438, 0x7211,
+        0xa438, 0x0000, 0xa438, 0x7220, 0xa438, 0x0000, 0xa438, 0x7214,
+        0xa438, 0x0000, 0xa438, 0x722f, 0xa438, 0x0000, 0xa438, 0x7223,
+        0xa438, 0x0000, 0xa438, 0x7232, 0xa438, 0x0000, 0xa438, 0x7226,
+        0xa438, 0xf8f9, 0xa438, 0xfae0, 0xa438, 0x85b3, 0xa438, 0x3802,
+        0xa438, 0xad27, 0xa438, 0x02ae, 0xa438, 0x03af, 0xa438, 0x8830,
+        0xa438, 0x1f66, 0xa438, 0xef65, 0xa438, 0xbfc2, 0xa438, 0x1f1a,
+        0xa438, 0x96f7, 0xa438, 0x05ee, 0xa438, 0xffd2, 0xa438, 0x00da,
+        0xa438, 0xf605, 0xa438, 0xbfc2, 0xa438, 0x2f1a, 0xa438, 0x96f7,
+        0xa438, 0x05ee, 0xa438, 0xffd2, 0xa438, 0x00db, 0xa438, 0xf605,
+        0xa438, 0xef02, 0xa438, 0x1f11, 0xa438, 0x0d42, 0xa438, 0xbf88,
+        0xa438, 0x4202, 0xa438, 0x6e7d, 0xa438, 0xef02, 0xa438, 0x1b03,
+        0xa438, 0x1f11, 0xa438, 0x0d42, 0xa438, 0xbf88, 0xa438, 0x4502,
+        0xa438, 0x6e7d, 0xa438, 0xef02, 0xa438, 0x1a03, 0xa438, 0x1f11,
+        0xa438, 0x0d42, 0xa438, 0xbf88, 0xa438, 0x4802, 0xa438, 0x6e7d,
+        0xa438, 0xbfc2, 0xa438, 0x3f1a, 0xa438, 0x96f7, 0xa438, 0x05ee,
+        0xa438, 0xffd2, 0xa438, 0x00da, 0xa438, 0xf605, 0xa438, 0xbfc2,
+        0xa438, 0x4f1a, 0xa438, 0x96f7, 0xa438, 0x05ee, 0xa438, 0xffd2,
+        0xa438, 0x00db, 0xa438, 0xf605, 0xa438, 0xef02, 0xa438, 0x1f11,
+        0xa438, 0x0d42, 0xa438, 0xbf88, 0xa438, 0x4b02, 0xa438, 0x6e7d,
+        0xa438, 0xef02, 0xa438, 0x1b03, 0xa438, 0x1f11, 0xa438, 0x0d42,
+        0xa438, 0xbf88, 0xa438, 0x4e02, 0xa438, 0x6e7d, 0xa438, 0xef02,
+        0xa438, 0x1a03, 0xa438, 0x1f11, 0xa438, 0x0d42, 0xa438, 0xbf88,
+        0xa438, 0x5102, 0xa438, 0x6e7d, 0xa438, 0xef56, 0xa438, 0xd020,
+        0xa438, 0x1f11, 0xa438, 0xbf88, 0xa438, 0x5402, 0xa438, 0x6e7d,
+        0xa438, 0xbf88, 0xa438, 0x5702, 0xa438, 0x6e7d, 0xa438, 0xbf88,
+        0xa438, 0x5a02, 0xa438, 0x6e7d, 0xa438, 0xe185, 0xa438, 0xa0ef,
+        0xa438, 0x0348, 0xa438, 0x0a28, 0xa438, 0x05ef, 0xa438, 0x201b,
+        0xa438, 0x01ad, 0xa438, 0x2735, 0xa438, 0x1f44, 0xa438, 0xe085,
+        0xa438, 0x88e1, 0xa438, 0x8589, 0xa438, 0xbf88, 0xa438, 0x5d02,
+        0xa438, 0x6e7d, 0xa438, 0xe085, 0xa438, 0x8ee1, 0xa438, 0x858f,
+        0xa438, 0xbf88, 0xa438, 0x6002, 0xa438, 0x6e7d, 0xa438, 0xe085,
+        0xa438, 0x94e1, 0xa438, 0x8595, 0xa438, 0xbf88, 0xa438, 0x6302,
+        0xa438, 0x6e7d, 0xa438, 0xe085, 0xa438, 0x9ae1, 0xa438, 0x859b,
+        0xa438, 0xbf88, 0xa438, 0x6602, 0xa438, 0x6e7d, 0xa438, 0xaf88,
+        0xa438, 0x3cbf, 0xa438, 0x883f, 0xa438, 0x026e, 0xa438, 0x9cad,
+        0xa438, 0x2835, 0xa438, 0x1f44, 0xa438, 0xe08f, 0xa438, 0xf8e1,
+        0xa438, 0x8ff9, 0xa438, 0xbf88, 0xa438, 0x5d02, 0xa438, 0x6e7d,
+        0xa438, 0xe08f, 0xa438, 0xfae1, 0xa438, 0x8ffb, 0xa438, 0xbf88,
+        0xa438, 0x6002, 0xa438, 0x6e7d, 0xa438, 0xe08f, 0xa438, 0xfce1,
+        0xa438, 0x8ffd, 0xa438, 0xbf88, 0xa438, 0x6302, 0xa438, 0x6e7d,
+        0xa438, 0xe08f, 0xa438, 0xfee1, 0xa438, 0x8fff, 0xa438, 0xbf88,
+        0xa438, 0x6602, 0xa438, 0x6e7d, 0xa438, 0xaf88, 0xa438, 0x3ce1,
+        0xa438, 0x85a1, 0xa438, 0x1b21, 0xa438, 0xad37, 0xa438, 0x341f,
+        0xa438, 0x44e0, 0xa438, 0x858a, 0xa438, 0xe185, 0xa438, 0x8bbf,
+        0xa438, 0x885d, 0xa438, 0x026e, 0xa438, 0x7de0, 0xa438, 0x8590,
+        0xa438, 0xe185, 0xa438, 0x91bf, 0xa438, 0x8860, 0xa438, 0x026e,
+        0xa438, 0x7de0, 0xa438, 0x8596, 0xa438, 0xe185, 0xa438, 0x97bf,
+        0xa438, 0x8863, 0xa438, 0x026e, 0xa438, 0x7de0, 0xa438, 0x859c,
+        0xa438, 0xe185, 0xa438, 0x9dbf, 0xa438, 0x8866, 0xa438, 0x026e,
+        0xa438, 0x7dae, 0xa438, 0x401f, 0xa438, 0x44e0, 0xa438, 0x858c,
+        0xa438, 0xe185, 0xa438, 0x8dbf, 0xa438, 0x885d, 0xa438, 0x026e,
+        0xa438, 0x7de0, 0xa438, 0x8592, 0xa438, 0xe185, 0xa438, 0x93bf,
+        0xa438, 0x8860, 0xa438, 0x026e, 0xa438, 0x7de0, 0xa438, 0x8598,
+        0xa438, 0xe185, 0xa438, 0x99bf, 0xa438, 0x8863, 0xa438, 0x026e,
+        0xa438, 0x7de0, 0xa438, 0x859e, 0xa438, 0xe185, 0xa438, 0x9fbf,
+        0xa438, 0x8866, 0xa438, 0x026e, 0xa438, 0x7dae, 0xa438, 0x0ce1,
+        0xa438, 0x85b3, 0xa438, 0x3904, 0xa438, 0xac2f, 0xa438, 0x04ee,
+        0xa438, 0x85b3, 0xa438, 0x00af, 0xa438, 0x39d9, 0xa438, 0x22ac,
+        0xa438, 0xeaf0, 0xa438, 0xacf6, 0xa438, 0xf0ac, 0xa438, 0xfaf0,
+        0xa438, 0xacf8, 0xa438, 0xf0ac, 0xa438, 0xfcf0, 0xa438, 0xad00,
+        0xa438, 0xf0ac, 0xa438, 0xfef0, 0xa438, 0xacf0, 0xa438, 0xf0ac,
+        0xa438, 0xf4f0, 0xa438, 0xacf2, 0xa438, 0xf0ac, 0xa438, 0xb0f0,
+        0xa438, 0xacae, 0xa438, 0xf0ac, 0xa438, 0xacf0, 0xa438, 0xacaa,
+        0xa438, 0xa100, 0xa438, 0x0ce1, 0xa438, 0x8ff7, 0xa438, 0xbf88,
+        0xa438, 0x8402, 0xa438, 0x6e7d, 0xa438, 0xaf26, 0xa438, 0xe9e1,
+        0xa438, 0x8ff6, 0xa438, 0xbf88, 0xa438, 0x8402, 0xa438, 0x6e7d,
+        0xa438, 0xaf26, 0xa438, 0xf520, 0xa438, 0xac86, 0xa438, 0xbf88,
+        0xa438, 0x3f02, 0xa438, 0x6e9c, 0xa438, 0xad28, 0xa438, 0x03af,
+        0xa438, 0x3324, 0xa438, 0xad38, 0xa438, 0x03af, 0xa438, 0x32e6,
+        0xa438, 0xaf32, 0xa438, 0xfb00, 0xa436, 0xb87c, 0xa438, 0x8ff6,
+        0xa436, 0xb87e, 0xa438, 0x0705, 0xa436, 0xb87c, 0xa438, 0x8ff8,
+        0xa436, 0xb87e, 0xa438, 0x19cc, 0xa436, 0xb87c, 0xa438, 0x8ffa,
+        0xa436, 0xb87e, 0xa438, 0x28e3, 0xa436, 0xb87c, 0xa438, 0x8ffc,
+        0xa436, 0xb87e, 0xa438, 0x1047, 0xa436, 0xb87c, 0xa438, 0x8ffe,
+        0xa436, 0xb87e, 0xa438, 0x0a45, 0xa436, 0xb85e, 0xa438, 0x271E,
+        0xa436, 0xb860, 0xa438, 0x3846, 0xa436, 0xb862, 0xa438, 0x26E6,
+        0xa436, 0xb864, 0xa438, 0x32E3, 0xa436, 0xb886, 0xa438, 0xffff,
+        0xa436, 0xb888, 0xa438, 0xffff, 0xa436, 0xb88a, 0xa438, 0xffff,
+        0xa436, 0xb88c, 0xa438, 0xffff, 0xa436, 0xb838, 0xa438, 0x000f,
+        0xb820, 0x0010, 0xa436, 0x846e, 0xa438, 0xaf84, 0xa438, 0x86af,
+        0xa438, 0x8690, 0xa438, 0xaf86, 0xa438, 0xa4af, 0xa438, 0x86a4,
+        0xa438, 0xaf86, 0xa438, 0xa4af, 0xa438, 0x86a4, 0xa438, 0xaf86,
+        0xa438, 0xa4af, 0xa438, 0x86a4, 0xa438, 0xee82, 0xa438, 0x5f00,
+        0xa438, 0x0284, 0xa438, 0x90af, 0xa438, 0x0441, 0xa438, 0xf8e0,
+        0xa438, 0x8ff3, 0xa438, 0xa000, 0xa438, 0x0502, 0xa438, 0x84a4,
+        0xa438, 0xae06, 0xa438, 0xa001, 0xa438, 0x0302, 0xa438, 0x84c8,
+        0xa438, 0xfc04, 0xa438, 0xf8f9, 0xa438, 0xef59, 0xa438, 0xe080,
+        0xa438, 0x15ad, 0xa438, 0x2702, 0xa438, 0xae03, 0xa438, 0xaf84,
+        0xa438, 0xc3bf, 0xa438, 0x53ca, 0xa438, 0x0252, 0xa438, 0xc8ad,
+        0xa438, 0x2807, 0xa438, 0x0285, 0xa438, 0x2cee, 0xa438, 0x8ff3,
+        0xa438, 0x01ef, 0xa438, 0x95fd, 0xa438, 0xfc04, 0xa438, 0xf8f9,
+        0xa438, 0xfaef, 0xa438, 0x69bf, 0xa438, 0x53ca, 0xa438, 0x0252,
+        0xa438, 0xc8ac, 0xa438, 0x2822, 0xa438, 0xd480, 0xa438, 0x00bf,
+        0xa438, 0x8684, 0xa438, 0x0252, 0xa438, 0xa9bf, 0xa438, 0x8687,
+        0xa438, 0x0252, 0xa438, 0xa9bf, 0xa438, 0x868a, 0xa438, 0x0252,
+        0xa438, 0xa9bf, 0xa438, 0x868d, 0xa438, 0x0252, 0xa438, 0xa9ee,
+        0xa438, 0x8ff3, 0xa438, 0x00af, 0xa438, 0x8526, 0xa438, 0xe08f,
+        0xa438, 0xf4e1, 0xa438, 0x8ff5, 0xa438, 0xe28f, 0xa438, 0xf6e3,
+        0xa438, 0x8ff7, 0xa438, 0x1b45, 0xa438, 0xac27, 0xa438, 0x0eee,
+        0xa438, 0x8ff4, 0xa438, 0x00ee, 0xa438, 0x8ff5, 0xa438, 0x0002,
+        0xa438, 0x852c, 0xa438, 0xaf85, 0xa438, 0x26e0, 0xa438, 0x8ff4,
+        0xa438, 0xe18f, 0xa438, 0xf52c, 0xa438, 0x0001, 0xa438, 0xe48f,
+        0xa438, 0xf4e5, 0xa438, 0x8ff5, 0xa438, 0xef96, 0xa438, 0xfefd,
+        0xa438, 0xfc04, 0xa438, 0xf8f9, 0xa438, 0xef59, 0xa438, 0xbf53,
+        0xa438, 0x2202, 0xa438, 0x52c8, 0xa438, 0xa18b, 0xa438, 0x02ae,
+        0xa438, 0x03af, 0xa438, 0x85da, 0xa438, 0xbf57, 0xa438, 0x7202,
+        0xa438, 0x52c8, 0xa438, 0xe48f, 0xa438, 0xf8e5, 0xa438, 0x8ff9,
+        0xa438, 0xbf57, 0xa438, 0x7502, 0xa438, 0x52c8, 0xa438, 0xe48f,
+        0xa438, 0xfae5, 0xa438, 0x8ffb, 0xa438, 0xbf57, 0xa438, 0x7802,
+        0xa438, 0x52c8, 0xa438, 0xe48f, 0xa438, 0xfce5, 0xa438, 0x8ffd,
+        0xa438, 0xbf57, 0xa438, 0x7b02, 0xa438, 0x52c8, 0xa438, 0xe48f,
+        0xa438, 0xfee5, 0xa438, 0x8fff, 0xa438, 0xbf57, 0xa438, 0x6c02,
+        0xa438, 0x52c8, 0xa438, 0xa102, 0xa438, 0x13ee, 0xa438, 0x8ffc,
+        0xa438, 0x80ee, 0xa438, 0x8ffd, 0xa438, 0x00ee, 0xa438, 0x8ffe,
+        0xa438, 0x80ee, 0xa438, 0x8fff, 0xa438, 0x00af, 0xa438, 0x8599,
+        0xa438, 0xa101, 0xa438, 0x0cbf, 0xa438, 0x534c, 0xa438, 0x0252,
+        0xa438, 0xc8a1, 0xa438, 0x0303, 0xa438, 0xaf85, 0xa438, 0x77bf,
+        0xa438, 0x5322, 0xa438, 0x0252, 0xa438, 0xc8a1, 0xa438, 0x8b02,
+        0xa438, 0xae03, 0xa438, 0xaf86, 0xa438, 0x64e0, 0xa438, 0x8ff8,
+        0xa438, 0xe18f, 0xa438, 0xf9bf, 0xa438, 0x8684, 0xa438, 0x0252,
+        0xa438, 0xa9e0, 0xa438, 0x8ffa, 0xa438, 0xe18f, 0xa438, 0xfbbf,
+        0xa438, 0x8687, 0xa438, 0x0252, 0xa438, 0xa9e0, 0xa438, 0x8ffc,
+        0xa438, 0xe18f, 0xa438, 0xfdbf, 0xa438, 0x868a, 0xa438, 0x0252,
+        0xa438, 0xa9e0, 0xa438, 0x8ffe, 0xa438, 0xe18f, 0xa438, 0xffbf,
+        0xa438, 0x868d, 0xa438, 0x0252, 0xa438, 0xa9af, 0xa438, 0x867f,
+        0xa438, 0xbf53, 0xa438, 0x2202, 0xa438, 0x52c8, 0xa438, 0xa144,
+        0xa438, 0x3cbf, 0xa438, 0x547b, 0xa438, 0x0252, 0xa438, 0xc8e4,
+        0xa438, 0x8ff8, 0xa438, 0xe58f, 0xa438, 0xf9bf, 0xa438, 0x547e,
+        0xa438, 0x0252, 0xa438, 0xc8e4, 0xa438, 0x8ffa, 0xa438, 0xe58f,
+        0xa438, 0xfbbf, 0xa438, 0x5481, 0xa438, 0x0252, 0xa438, 0xc8e4,
+        0xa438, 0x8ffc, 0xa438, 0xe58f, 0xa438, 0xfdbf, 0xa438, 0x5484,
+        0xa438, 0x0252, 0xa438, 0xc8e4, 0xa438, 0x8ffe, 0xa438, 0xe58f,
+        0xa438, 0xffbf, 0xa438, 0x5322, 0xa438, 0x0252, 0xa438, 0xc8a1,
+        0xa438, 0x4448, 0xa438, 0xaf85, 0xa438, 0xa7bf, 0xa438, 0x5322,
+        0xa438, 0x0252, 0xa438, 0xc8a1, 0xa438, 0x313c, 0xa438, 0xbf54,
+        0xa438, 0x7b02, 0xa438, 0x52c8, 0xa438, 0xe48f, 0xa438, 0xf8e5,
+        0xa438, 0x8ff9, 0xa438, 0xbf54, 0xa438, 0x7e02, 0xa438, 0x52c8,
+        0xa438, 0xe48f, 0xa438, 0xfae5, 0xa438, 0x8ffb, 0xa438, 0xbf54,
+        0xa438, 0x8102, 0xa438, 0x52c8, 0xa438, 0xe48f, 0xa438, 0xfce5,
+        0xa438, 0x8ffd, 0xa438, 0xbf54, 0xa438, 0x8402, 0xa438, 0x52c8,
+        0xa438, 0xe48f, 0xa438, 0xfee5, 0xa438, 0x8fff, 0xa438, 0xbf53,
+        0xa438, 0x2202, 0xa438, 0x52c8, 0xa438, 0xa131, 0xa438, 0x03af,
+        0xa438, 0x85a7, 0xa438, 0xd480, 0xa438, 0x00bf, 0xa438, 0x8684,
+        0xa438, 0x0252, 0xa438, 0xa9bf, 0xa438, 0x8687, 0xa438, 0x0252,
+        0xa438, 0xa9bf, 0xa438, 0x868a, 0xa438, 0x0252, 0xa438, 0xa9bf,
+        0xa438, 0x868d, 0xa438, 0x0252, 0xa438, 0xa9ef, 0xa438, 0x95fd,
+        0xa438, 0xfc04, 0xa438, 0xf0d1, 0xa438, 0x2af0, 0xa438, 0xd12c,
+        0xa438, 0xf0d1, 0xa438, 0x44f0, 0xa438, 0xd146, 0xa438, 0xbf86,
+        0xa438, 0xa102, 0xa438, 0x52c8, 0xa438, 0xbf86, 0xa438, 0xa102,
+        0xa438, 0x52c8, 0xa438, 0xd101, 0xa438, 0xaf06, 0xa438, 0xa570,
+        0xa438, 0xce42, 0xa436, 0xb818, 0xa438, 0x043d, 0xa436, 0xb81a,
+        0xa438, 0x06a3, 0xa436, 0xb81c, 0xa438, 0xffff, 0xa436, 0xb81e,
+        0xa438, 0xffff, 0xa436, 0xb850, 0xa438, 0xffff, 0xa436, 0xb852,
+        0xa438, 0xffff, 0xa436, 0xb878, 0xa438, 0xffff, 0xa436, 0xb884,
+        0xa438, 0xffff, 0xa436, 0xb832, 0xa438, 0x0003, 0xa436, 0x0000,
+        0xa438, 0x0000, 0xa436, 0xB82E, 0xa438, 0x0000, 0xa436, 0x8024,
+        0xa438, 0x0000, 0xa436, 0x801E, 0xa438, 0x0021, 0xb820, 0x0000,
+        0xFFFF, 0xFFFF
 };
 
 static void
@@ -24815,6 +24216,9 @@ static void re_init_hw_phy_mcu(struct re_softc *sc)
         case MACFG_69:
                 re_set_phy_mcu_8168h_2(sc);
                 break;
+        case MACFG_74:
+                re_set_phy_mcu_8168h_3(sc);
+                break;
         case MACFG_80:
                 re_set_phy_mcu_8125a_1(sc);
                 break;
@@ -24841,7 +24245,6 @@ static void re_set_hw_phy_before_init_phy_mcu(struct re_softc *sc)
 
         switch (sc->re_type) {
         case MACFG_82:
-        case MACFG_83:
                 MP_RealWritePhyOcpRegWord(sc, 0xBF86, 0x9000);
 
                 SetEthPhyOcpBit(sc, 0xC402, BIT_10);
@@ -24885,6 +24288,8 @@ static void re_hw_phy_config(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
         case MACFG_80:
         case MACFG_81:
         case MACFG_82:
@@ -29484,7 +28889,7 @@ static void re_hw_phy_config(struct re_softc *sc)
                 MP_WritePhyUshort(sc, 0x1F, 0x0000);
                 MP_WritePhyUshort(sc, 0x00, 0x9200);
         }  else if (sc->re_type == MACFG_70 || sc->re_type == MACFG_71 ||
-                    sc->re_type == MACFG_72) {
+                    sc->re_type == MACFG_72 || sc->re_type == MACFG_73) {
                 MP_WritePhyUshort(sc, 0x1F, 0x0A43);
                 MP_WritePhyUshort(sc, 0x13, 0x808E);
                 ClearAndSetEthPhyBit(sc,
@@ -29632,6 +29037,22 @@ static void re_hw_phy_config(struct re_softc *sc)
                 MP_WritePhyUshort(sc, 0x1F, 0x0A40);
                 MP_WritePhyUshort(sc, 0x1F, 0x0000);
                 MP_WritePhyUshort(sc, 0x00, 0x9200);
+        } else if (sc->re_type == MACFG_74) {
+                MP_WritePhyUshort(sc, 0x1F, 0x0A44);
+                SetEthPhyBit(sc, 0x11, BIT_11);
+                MP_WritePhyUshort(sc, 0x1F, 0x0000);
+
+                if (phy_power_saving == 1) {
+                        MP_WritePhyUshort(sc, 0x1F, 0x0A43);
+                        SetEthPhyBit(sc, 0x10, BIT_2);
+                        MP_WritePhyUshort(sc, 0x1F, 0x0000);
+                } else {
+                        MP_WritePhyUshort(sc, 0x1F, 0x0A43);
+                        ClearEthPhyBit(sc, 0x10, BIT_2);
+                        MP_WritePhyUshort(sc, 0x1F, 0x0000);
+                        DELAY(20000);
+                }
+
         } else if (sc->re_type == MACFG_80) {
                 ClearAndSetEthPhyOcpBit(sc,
                                         0xAD40,
@@ -30491,9 +29912,23 @@ static void re_hw_phy_config(struct re_softc *sc)
                 MP_RealWritePhyOcpRegWord(sc, 0xa436, 0x807A);
                 MP_RealWritePhyOcpRegWord(sc, 0xa438, 0x2417);
 
-                ////Nway DACONB
-                //GPHY OCP 0xA4CA bit[6] = 0x1 (rg_dac_lp_burst_off_option)
+
                 SetEthPhyOcpBit(sc, 0xA4CA, BIT_6);
+
+
+                ClearAndSetEthPhyOcpBit(sc,
+                                        0xBF84,
+                                        BIT_15 | BIT_14 | BIT_13,
+                                        BIT_15 | BIT_13
+                                       );
+
+
+                MP_RealWritePhyOcpRegWord(sc, 0xA436, 0x8170);
+                ClearAndSetEthPhyOcpBit(sc,
+                                        0xA438,
+                                        BIT_13 | BIT_10 | BIT_9 | BIT_8,
+                                        BIT_15 | BIT_14 | BIT_12 | BIT_11
+                                       );
 
                 /*
                 MP_RealWritePhyOcpRegWord(sc, 0xBFA0, 0xD70D);
@@ -30535,7 +29970,8 @@ static void re_hw_phy_config(struct re_softc *sc)
                 MP_WritePhyUshort(sc, 0x14, 0x9065);
                 MP_WritePhyUshort(sc, 0x14, 0x1065);
                 MP_WritePhyUshort(sc, 0x1F, 0x0000);
-        } else if (sc->re_type == MACFG_68 || sc->re_type == MACFG_69) {
+        } else if (sc->re_type == MACFG_68 || sc->re_type == MACFG_69 ||
+                   sc->re_type == MACFG_74) {
                 //enable EthPhyPPSW
                 MP_WritePhyUshort(sc, 0x1F, 0x0A44);
                 SetEthPhyBit(sc, 0x11, BIT_7);
@@ -30556,6 +29992,8 @@ static void re_hw_phy_config(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
+        case MACFG_74:
         case MACFG_80:
         case MACFG_81:
         case MACFG_82:
@@ -30604,6 +30042,8 @@ static void re_hw_phy_config(struct re_softc *sc)
                 case MACFG_70:
                 case MACFG_71:
                 case MACFG_72:
+                case MACFG_73:
+                case MACFG_74:
                         re_enable_ocp_phy_power_saving(sc);
                         break;
                 case MACFG_80:
@@ -30651,7 +30091,8 @@ void MP_WritePhyUshort(struct re_softc *sc,u_int8_t RegAddr,u_int16_t RegData)
                    sc->re_type == MACFG_62 || sc->re_type == MACFG_67 ||
                    sc->re_type == MACFG_68 || sc->re_type == MACFG_69 ||
                    sc->re_type == MACFG_70 || sc->re_type == MACFG_71 ||
-                   sc->re_type == MACFG_72 || sc->re_type == MACFG_80 ||
+                   sc->re_type == MACFG_72 || sc->re_type == MACFG_73 ||
+                   sc->re_type == MACFG_74 || sc->re_type == MACFG_80 ||
                    sc->re_type == MACFG_81 || sc->re_type == MACFG_82 ||
                    sc->re_type == MACFG_83) {
                 if (RegAddr == 0x1F) {
@@ -30715,7 +30156,8 @@ u_int16_t MP_ReadPhyUshort(struct re_softc *sc,u_int8_t RegAddr)
                    sc->re_type == MACFG_62 || sc->re_type == MACFG_67 ||
                    sc->re_type == MACFG_68 || sc->re_type == MACFG_69 ||
                    sc->re_type == MACFG_70 || sc->re_type == MACFG_71 ||
-                   sc->re_type == MACFG_72 || sc->re_type == MACFG_80 ||
+                   sc->re_type == MACFG_72 || sc->re_type == MACFG_73 ||
+                   sc->re_type == MACFG_74 || sc->re_type == MACFG_80 ||
                    sc->re_type == MACFG_81 || sc->re_type == MACFG_82 ||
                    sc->re_type == MACFG_83) {
                 RegData = MP_ReadPhyOcpRegWord(sc, sc->cur_page, RegAddr);
@@ -31020,6 +30462,7 @@ u_int32_t MP_ReadPciEConfigSpace(
         return MP_ReadOtherFunPciEConfigSpace(sc, MultiFunSelBit, ByteEnAndAddr);
 }
 
+/*
 u_int8_t MP_ReadByteFun0PciEConfigSpace(
         struct re_softc *sc,
         u_int16_t RegAddr)
@@ -31038,6 +30481,7 @@ u_int8_t MP_ReadByteFun0PciEConfigSpace(
 
         return RetVal;
 }
+*/
 
 static u_int16_t MappingPhyOcpAddress(
         struct re_softc *sc,
@@ -31356,6 +30800,7 @@ static void OOB_mutex_lock(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
         default:
                 ocp_reg_mutex_oob = 0x110;
                 ocp_reg_mutex_ib = 0x114;
@@ -31417,6 +30862,7 @@ static void OOB_mutex_unlock(struct re_softc *sc)
         case MACFG_70:
         case MACFG_71:
         case MACFG_72:
+        case MACFG_73:
         default:
                 ocp_reg_mutex_oob = 0x110;
                 ocp_reg_mutex_ib = 0x114;
@@ -31430,39 +30876,19 @@ static void OOB_mutex_unlock(struct re_softc *sc)
 
 static int re_check_dash(struct re_softc *sc)
 {
-        switch(sc->re_type) {
-        case MACFG_61:
-        case MACFG_62:
-        case MACFG_67:
-        case MACFG_63:
-        case MACFG_64:
-        case MACFG_65:
-        case MACFG_66:
-        case MACFG_70:
-        case MACFG_71:
-        case MACFG_72:
-                if (HW_DASH_SUPPORT_TYPE_2(sc) || HW_DASH_SUPPORT_TYPE_3(sc)) {
-                        if (OCP_read(sc, 0x128, 1) & BIT_0)
-                                return 1;
-                        else
-                                return 0;
-                } else {
-                        u_int32_t reg;
-
-                        if (sc->re_type == MACFG_66)
-                                reg = 0xb8;
-                        else
-                                reg = 0x10;
-
-                        if (OCP_read(sc, reg, 2) & 0x00008000)
-                                return 1;
-                        else
-                                return 0;
-                }
-                break;
-        default:
+        if (HW_DASH_SUPPORT_DASH(sc) == FALSE)
                 return 0;
+
+        if (HW_DASH_SUPPORT_TYPE_2(sc) || HW_DASH_SUPPORT_TYPE_3(sc)) {
+                return !!(OCP_read(sc, 0x128, 1) & BIT_0);
+        } else if (HW_DASH_SUPPORT_TYPE_1(sc)) {
+                if (sc->re_type == MACFG_66)
+                        return !!(OCP_read(sc, 0xb8, 2) & BIT_15);
+                else
+                        return !!(OCP_read(sc, 0x10, 2) & BIT_15);
         }
+
+        return 0;
 }
 
 static void OOB_notify(struct re_softc *sc, u_int8_t cmd)
