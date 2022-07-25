@@ -316,6 +316,7 @@
 #define RE_CMD_TX_ENB		0x0004
 #define RE_CMD_RX_ENB		0x0008
 #define RE_CMD_RESET		0x0010
+#define RE_CMD_STOP_REQ		0x0080
 
 /*
  * EEPROM control register
@@ -504,6 +505,8 @@ struct re_chain_data {
         u_int8_t		last_tx;	/* Previous Tx OK */
         u_int8_t		cur_tx;		/* Next to TX */
 };
+
+#define HW_SUPPORT_MAC_MCU(_M)        ((_M)->HwSuppMacMcuVer > 0)
 
 //+++ From FreeBSD 9.0 +++
 
@@ -859,6 +862,8 @@ enum {
         MACFG_70,
         MACFG_71,
         MACFG_72,
+        MACFG_73,
+        MACFG_74,
 
         MACFG_80,
         MACFG_81,
@@ -968,6 +973,9 @@ struct re_softc {
         u_int32_t HwFiberModeVer;
         u_int32_t HwFiberStat;
 
+        u_int8_t HwSuppMacMcuVer;
+        u_int16_t MacMcuPageSize;
+
         int (*ifmedia_upd)(struct ifnet *);
         void (*ifmedia_sts)(struct ifnet *, struct ifmediareq *);
 #if OS_VER < VERSION(7,0)
@@ -1061,6 +1069,7 @@ enum bits {
 #define RT_DEVICEID_8169SC			0x8167		/* For RTL8169SC */
 #define RT_DEVICEID_8168			0x8168		/* For RTL8168B */
 #define RT_DEVICEID_8161			0x8161		/* For RTL8168 Series add-on card */
+#define RT_DEVICEID_8162			0x8162		/* For RTL8168KB */
 #define RT_DEVICEID_8136			0x8136		/* For RTL8101E */
 #define RT_DEVICEID_8125			0x8125		/* For RTL8125 */
 
@@ -1143,6 +1152,8 @@ enum bits {
 
 #define RTK_ADVERTISE_2500FULL  0x80
 
+#define RTL8125_MAC_MCU_PAGE_SIZE 256 //256 words
+
 //Ram Code Version
 #define NIC_RAMCODE_VERSION_8168E (0x0057)
 #define NIC_RAMCODE_VERSION_8168EVL (0x0055)
@@ -1152,12 +1163,13 @@ enum bits {
 #define NIC_RAMCODE_VERSION_8168GU (0x0001)
 #define NIC_RAMCODE_VERSION_8168EP (0x0019)
 #define NIC_RAMCODE_VERSION_8411B (0x0012)
-#define NIC_RAMCODE_VERSION_8168H (0x0018)
+#define NIC_RAMCODE_VERSION_8168H (0x0055)
+#define NIC_RAMCODE_VERSION_8168H_6838 (0x0010)
 #define NIC_RAMCODE_VERSION_8168FP (0x0003)
 #define NIC_RAMCODE_VERSION_8125A_REV_A (0x0B11)
 #define NIC_RAMCODE_VERSION_8125A_REV_B (0x0B33)
 #define NIC_RAMCODE_VERSION_8125B_REV_A (0x0B17)
-#define NIC_RAMCODE_VERSION_8125B_REV_B (0x0B36)
+#define NIC_RAMCODE_VERSION_8125B_REV_B (0x0B74)
 
 #ifdef __alpha__
 #undef vtophys
